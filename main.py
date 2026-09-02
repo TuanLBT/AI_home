@@ -575,6 +575,8 @@ def main():
                     )
 
                     executed_actions = action_executor.update()
+                    for executed in executed_actions:
+                        world.record_action_result(executed)
 
                     memory.record_executed_actions(
                         executed_actions,
@@ -687,6 +689,8 @@ def main():
                         )
 
                 executed_actions = action_executor.update()
+                for executed in executed_actions:
+                    world.record_action_result(executed)
 
                 memory.record_executed_actions(
                     executed_actions,

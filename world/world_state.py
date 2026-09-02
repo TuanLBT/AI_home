@@ -36,6 +36,9 @@ class WorldState:
         self.track_to_entity: dict[int, str] = {}
         self.next_person_id = 1
 
+        self.action_feedback: dict[str, dict] = {}
+        self.last_action_result: dict | None = None
+
         self.left_timeout_s = left_timeout_s
         self.present_log_interval_s = present_log_interval_s
         self.keypoint_confidence = keypoint_confidence
@@ -52,6 +55,43 @@ class WorldState:
         self.horizontal_start_threshold = horizontal_start_threshold
         self.horizontal_stop_threshold = horizontal_stop_threshold
         self.horizontal_confirm_frames = max(1, horizontal_confirm_frames)
+
+    def record_action_result(self, result: dict) -> None:
+        if result.get("type") != "ACTION_EXECUTED":
+            return
+
+        entity_id = result.get("entity_id")
+        if entity_id is None:
+            return
+
+        snapshot = {
+            "request_id": result.get("request_id"),
+            "entity_id": entity_id,
+            "action": result.get("action"),
+            "command": result.get("command"),
+            "status": result.get("status"),
+            "reason": result.get("reason"),
+            "actual": dict(result.get("actual") or {}),
+            "observations": dict(result.get("observations") or {}),
+            "goal_id": result.get("goal_id"),
+            "goal_reached": result.get("goal_reached"),
+            "timestamp": result.get("timestamp"),
+            "finished_at": result.get("finished_at"),
+            "speech_ok": result.get("speech_ok"),
+            "speech_error": result.get("speech_error"),
+        }
+
+        self.action_feedback[entity_id] = snapshot
+        self.last_action_result = snapshot
+
+    def get_action_feedback(self, entity_id: str | None = None) -> dict | None:
+        if entity_id is None:
+            if self.last_action_result is None:
+                return None
+            return dict(self.last_action_result)
+
+        result = self.action_feedback.get(entity_id)
+        return dict(result) if result is not None else None
 
     def update(
         self,
