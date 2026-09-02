@@ -1,8 +1,7 @@
 import json
 from typing import Any, Dict
 from urllib import request, error
-
-from action_validator import ActionValidator
+from action.action_validator import ActionValidator
 
 
 class BrainClient:
