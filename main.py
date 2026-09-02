@@ -1,0 +1,730 @@
+from __future__ import annotations
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+import time
+import cv2
+
+from config import Config
+from camera.pose_tracker import PersonPoseTracker
+from world.world_state import WorldState
+from world.event_engine import EventEngine
+from behavior.behavior_engine import BehaviorEngine
+from action.action_executor import ActionExecutor
+from memory.interaction_memory import InteractionMemory
+from audio.mic_vad import MicVAD
+from audio.asr_worker import ASRWorker
+from language.intent_engine import IntentEngine
+from language.voice_event_engine import VoiceEventEngine
+from language.dialogue_state import DialogueStateManager
+from language.llm_worker import LLMWorker
+
+
+SKELETON = [
+    (5, 7), (7, 9),
+    (6, 8), (8, 10),
+    (5, 6),
+    (5, 11), (6, 12),
+    (11, 12),
+    (11, 13), (13, 15),
+    (12, 14), (14, 16),
+]
+
+
+def draw_overlay(
+    frame,
+    observations,
+    world: WorldState,
+    behavior_engine: BehaviorEngine,
+    cfg: Config,
+):
+    for obs in observations:
+        x1, y1, x2, y2 = map(int, obs.data["bbox"])
+        entity_id = obs.entity_id
+
+        cv2.rectangle(
+            frame,
+            (x1, y1),
+            (x2, y2),
+            (255, 255, 255),
+            2,
+        )
+
+        person = world.people.get(entity_id)
+        gestures = sorted(person.active_gestures) if person else []
+
+        label = entity_id
+
+        if gestures:
+            label += " | " + ", ".join(gestures)
+
+        if person:
+            label += f" | posture={person.posture}"
+            label += f" | motion={person.fused_motion}"
+
+        label += f" | behavior={behavior_engine.get_state(entity_id)}"
+
+        cv2.putText(
+            frame,
+            label,
+            (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.46,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        points = obs.data.get("keypoints", [])
+        confs = obs.data.get("keypoint_confidences", [])
+
+        for i, point in enumerate(points):
+            if i >= len(confs) or confs[i] < cfg.keypoint_confidence:
+                continue
+
+            x, y = map(int, point)
+
+            if x > 0 and y > 0:
+                cv2.circle(
+                    frame,
+                    (x, y),
+                    3,
+                    (255, 255, 255),
+                    -1,
+                )
+
+        for a, b in SKELETON:
+            if (
+                a < len(points)
+                and b < len(points)
+                and a < len(confs)
+                and b < len(confs)
+                and confs[a] >= cfg.keypoint_confidence
+                and confs[b] >= cfg.keypoint_confidence
+            ):
+                ax, ay = map(int, points[a])
+                bx, by = map(int, points[b])
+
+                if ax > 0 and ay > 0 and bx > 0 and by > 0:
+                    cv2.line(
+                        frame,
+                        (ax, ay),
+                        (bx, by),
+                        (255, 255, 255),
+                        2,
+                    )
+
+    present_count = sum(
+        1
+        for person in world.people.values()
+        if person.present
+    )
+
+    cv2.putText(
+        frame,
+        f"people: {present_count} | perception: {cfg.perception_fps:.1f} FPS | CPU",
+        (15, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def print_event(event: dict):
+    t = event["type"]
+
+    if t == "PRESENT":
+        print(
+            f'{event["entity_id"]} PRESENT '
+            f'({event["seen_duration"]:.1f}s)'
+        )
+
+    elif t in ("GESTURE_STARTED", "GESTURE_ENDED"):
+        print(
+            f'{event["entity_id"]} {t}: '
+            f'{event["gesture"]}'
+        )
+
+    elif t == "POSTURE_INITIALIZED":
+        print(
+            f'{event["entity_id"]} POSTURE_INITIALIZED: '
+            f'{event["posture"]}'
+        )
+
+    elif t in ("SAT_DOWN", "STOOD_UP"):
+        print(f'{event["entity_id"]} {t}')
+
+    elif t in (
+        "APPROACHING",
+        "MOVING_AWAY",
+        "MOVEMENT_STOPPED",
+    ):
+        print(
+            f'{event["entity_id"]} {t} '
+            f'(scale_change={event["scale_change"]:+.2f})'
+        )
+
+    elif t in (
+        "MOVING_LEFT",
+        "MOVING_RIGHT",
+        "HORIZONTAL_STOPPED",
+    ):
+        print(
+            f'{event["entity_id"]} {t} '
+            f'(dx={event["horizontal_delta"]:+.2f})'
+        )
+
+    elif t == "MOTION_CHANGED":
+        print(
+            f'{event["entity_id"]} MOTION_CHANGED: '
+            f'{event["old_motion"]} -> {event["motion"]} '
+            f'[horizontal={event["horizontal_state"]}, '
+            f'depth={event["depth_state"]}]'
+        )
+
+    else:
+        print(f'{event["entity_id"]} {t}')
+
+
+def print_high_level_event(event: dict):
+    t = event["type"]
+
+    if t == "ENTERED_AND_APPROACHING":
+        print(
+            f'>>> EVENT {event["entity_id"]}: '
+            f'ENTERED_AND_APPROACHING'
+        )
+
+    elif t == "SAT_AND_STAYED":
+        print(
+            f'>>> EVENT {event["entity_id"]}: '
+            f'SAT_AND_STAYED '
+            f'({event["duration"]:.1f}s)'
+        )
+
+    elif t == "GESTURE_WHILE_PRESENT":
+        print(
+            f'>>> EVENT {event["entity_id"]}: '
+            f'GESTURE_WHILE_PRESENT '
+            f'[{event["gesture"]}]'
+        )
+
+    else:
+        print(
+            f'>>> EVENT {event["entity_id"]}: {t}'
+        )
+
+
+def print_audio_event(event: dict):
+    if event["type"] == "SPEECH_SEGMENT_READY":
+        print(
+            f'>>> AUDIO: SPEECH_SEGMENT_READY '
+            f'({event["duration_s"]:.2f}s)'
+        )
+        return
+
+    print(
+        f'>>> AUDIO: {event["type"]} '
+        f'(level={event["level"]:.3f})'
+    )
+
+
+def print_asr_event(event: dict):
+    if event["type"] == "ASR_TEXT":
+        print(
+            f'>>> ASR: {event["text"]}'
+        )
+    else:
+        print(
+            f'>>> ASR ERROR: {event["error"]}'
+        )
+
+
+def print_llm_event(event: dict):
+    if event["type"] == "LLM_REPLY":
+        print(
+            f'>>> LLM {event["entity_id"]}: {event["text"]}'
+        )
+    else:
+        print(
+            f'>>> LLM ERROR {event["entity_id"]}: '
+            f'{event["error"]}'
+        )
+
+
+def print_dialogue_event(event: dict):
+    if event["type"] == "DIALOGUE_STARTED":
+        print(
+            f'>>> DIALOGUE {event["entity_id"]}: started'
+        )
+    elif event["type"] == "DIALOGUE_ENDED":
+        print(
+            f'>>> DIALOGUE {event["entity_id"]}: ended '
+            f'(turns={event["turn_count"]})'
+        )
+    elif event["type"] == "VOICE_UTTERANCE":
+        print(
+            f'>>> DIALOGUE {event["entity_id"]}: '
+            f'utterance={event["text"]!r}'
+        )
+
+
+def print_voice_event(event: dict):
+    if event["type"] == "VOICE_UNASSIGNED":
+        print(
+            f'>>> VOICE EVENT: UNASSIGNED '
+            f'[{event["intent"]}] text={event["text"]!r}'
+        )
+        return
+
+    print(
+        f'>>> VOICE EVENT {event["entity_id"]}: '
+        f'{event["type"]}'
+    )
+
+
+def print_intent(intent):
+    print(
+        f'>>> INTENT: {intent.type} '
+        f'(confidence={intent.confidence:.2f}, text={intent.text!r})'
+    )
+
+
+def print_action_execution(event: dict):
+    extra = ""
+
+    if event.get("gesture") is not None:
+        extra = f' [{event["gesture"]}]'
+
+    print(
+        f'>>> EXECUTE {event["entity_id"]}: '
+        f'{event["command"]}{extra} '
+        f'(action={event["action"]})'
+    )
+
+
+def print_behavior_event(event: dict):
+    if event["type"] == "STATE_CHANGED":
+        print(
+            f'>>> STATE {event["entity_id"]}: '
+            f'{event["old_state"]} -> {event["state"]} '
+            f'(reason={event["reason"]})'
+        )
+
+    elif event["type"] == "ATTENTION_REFRESHED":
+        print(
+            f'>>> ATTENTION {event["entity_id"]}: '
+            f'refreshed (reason={event["reason"]})'
+        )
+
+    elif event["type"] == "ACTION_SUPPRESSED":
+        extra = ""
+
+        if event.get("gesture") is not None:
+            extra = f' [{event["gesture"]}]'
+
+        print(
+            f'>>> SUPPRESS {event["entity_id"]}: '
+            f'{event["action"]}{extra} '
+            f'(reason={event["reason"]}, '
+            f'cooldown={event["cooldown_remaining_s"]:.1f}s)'
+        )
+
+    elif event["type"] == "ACTION":
+        extra = ""
+
+        if "gesture" in event:
+            extra = f' [{event["gesture"]}]'
+
+        print(
+            f'>>> ACTION {event["entity_id"]}: '
+            f'{event["action"]}{extra} '
+            f'(reason={event["reason"]})'
+        )
+
+
+def main():
+    cfg = Config()
+
+    cap = cv2.VideoCapture(cfg.camera_index)
+
+    if not cap.isOpened():
+        raise RuntimeError(
+            f"Cannot open camera index {cfg.camera_index}. "
+            "Try changing camera_index in config.py."
+        )
+
+    perception = PersonPoseTracker(
+        model_name=cfg.model_name,
+        confidence=cfg.confidence,
+        imgsz=cfg.imgsz,
+        device=cfg.device,
+    )
+
+    world = WorldState(
+        left_timeout_s=cfg.left_timeout_s,
+        present_log_interval_s=cfg.present_log_interval_s,
+        keypoint_confidence=cfg.keypoint_confidence,
+        gesture_confirm_frames=cfg.gesture_confirm_frames,
+    )
+
+    event_engine = EventEngine(
+        entered_approach_window_s=10.0,
+        sat_stay_s=3.0,
+    )
+
+    behavior_engine = BehaviorEngine(
+        greeting_duration_s=1.5,
+    )
+
+    action_executor = ActionExecutor()
+    memory = InteractionMemory(
+        retention_s=60.0,
+        max_items_per_person=100,
+    )
+
+    mic = MicVAD()
+    mic.start()
+
+    asr = ASRWorker(
+        model_size="base",
+        language="ja",
+        device="cpu",
+        compute_type="int8",
+    )
+
+    intent_engine = IntentEngine()
+    voice_event_engine = VoiceEventEngine()
+    dialogue = DialogueStateManager(
+        inactivity_timeout_s=15.0,
+    )
+
+    llm = LLMWorker()
+
+    pending_voice_events: list[dict] = []
+
+    perception_interval = 1.0 / cfg.perception_fps
+    next_perception_time = 0.0
+    latest_observations = []
+
+    print("M1 + Event + Behavior State Machine running.")
+    print(f"Device: {cfg.device}")
+    print(f"AI perception rate: {cfg.perception_fps:.1f} FPS")
+    print(f"Model: {cfg.model_name}")
+    print("Press Q or ESC to quit.")
+
+    try:
+        while True:
+            ok, frame = cap.read()
+
+            if not ok:
+                print("Camera frame read failed.")
+                break
+
+            now = time.monotonic()
+
+            audio_events = mic.update()
+
+            for event in audio_events:
+                print_audio_event(event)
+
+                if event["type"] == "SPEECH_SEGMENT_READY":
+                    accepted = asr.submit(
+                        audio=event["audio"],
+                        sample_rate=event["sample_rate"],
+                        timestamp=event["timestamp"],
+                    )
+
+                    if not accepted:
+                        print(">>> ASR: queue full, segment dropped")
+
+            for event in asr.update():
+                print_asr_event(event)
+
+                if event["type"] == "ASR_TEXT":
+                    intent = intent_engine.parse(
+                        event["text"]
+                    )
+                    print_intent(intent)
+
+                    voice_events = voice_event_engine.process(
+                        intent,
+                        world,
+                        behavior_engine,
+                        now,
+                    )
+
+                    if intent.type == "UNKNOWN":
+                        voice_events.extend(
+                            dialogue.handle_unknown(
+                                intent,
+                                world,
+                                behavior_engine,
+                                now,
+                            )
+                        )
+
+                    for voice_event in voice_events:
+                        if voice_event["type"] == "VOICE_UTTERANCE":
+                            print_dialogue_event(voice_event)
+
+                            entity_id = voice_event["entity_id"]
+                            person = world.people.get(entity_id)
+
+                            llm_context = {
+                                "behavior_state": behavior_engine.get_state(
+                                    entity_id
+                                ),
+                                "posture": (
+                                    getattr(person, "posture", None)
+                                    if person is not None
+                                    else None
+                                ),
+                                "motion": (
+                                    getattr(person, "fused_motion", None)
+                                    if person is not None
+                                    else None
+                                ),
+                                "memory": memory.snapshot(
+                                    entity_id,
+                                    now,
+                                    within_s=30.0,
+                                ),
+                                "dialogue": dialogue.snapshot(
+                                    entity_id,
+                                    now,
+                                ),
+                            }
+
+                            accepted = llm.submit(
+                                entity_id=entity_id,
+                                text=voice_event["text"],
+                                context=llm_context,
+                                timestamp=now,
+                            )
+
+                            if not accepted:
+                                print(
+                                    ">>> LLM: queue full, utterance dropped"
+                                )
+                        else:
+                            print_voice_event(voice_event)
+
+                        if voice_event.get("entity_id") is not None:
+                            pending_voice_events.append(
+                                voice_event
+                            )
+
+                            for dialogue_event in dialogue.observe_voice_event(
+                                voice_event,
+                                now,
+                            ):
+                                print_dialogue_event(
+                                    dialogue_event
+                                )
+
+            for dialogue_event in dialogue.update(now):
+                print_dialogue_event(dialogue_event)
+
+            for llm_event in llm.update():
+                print_llm_event(llm_event)
+
+                if llm_event["type"] == "LLM_REPLY":
+                    entity_id = llm_event["entity_id"]
+                    person = world.people.get(entity_id)
+
+                    context = {
+                        "behavior_state": behavior_engine.get_state(
+                            entity_id
+                        ),
+                        "posture": (
+                            getattr(person, "posture", None)
+                            if person is not None
+                            else None
+                        ),
+                        "motion": (
+                            getattr(person, "fused_motion", None)
+                            if person is not None
+                            else None
+                        ),
+                        "memory": memory.snapshot(
+                            entity_id,
+                            now,
+                            within_s=30.0,
+                        ),
+                        "dialogue": dialogue.snapshot(
+                            entity_id,
+                            now,
+                        ),
+                    }
+
+                    action_executor.submit(
+                        {
+                            "type": "ACTION",
+                            "entity_id": entity_id,
+                            "action": "speak_text",
+                            "speech_text": llm_event["text"],
+                            "reason": "LLM_REPLY",
+                            "timestamp": now,
+                        },
+                        context=context,
+                    )
+
+                    executed_actions = action_executor.update()
+
+                    memory.record_executed_actions(
+                        executed_actions,
+                        now,
+                    )
+
+                    for executed in executed_actions:
+                        print_action_execution(executed)
+
+            if now >= next_perception_time:
+                latest_observations = perception.process(frame)
+
+                low_level_events = world.update(
+                    latest_observations,
+                    now=now,
+                )
+
+                for event in low_level_events:
+                    print_event(event)
+
+                memory.record_low_level_events(
+                    low_level_events,
+                    now,
+                )
+
+                high_level_events = event_engine.process(
+                    low_level_events,
+                    world,
+                    now,
+                )
+
+                for event in high_level_events:
+                    print_high_level_event(event)
+
+                memory.record_high_level_events(
+                    high_level_events,
+                    now,
+                )
+
+                if pending_voice_events:
+                    memory.record_high_level_events(
+                        pending_voice_events,
+                        now,
+                    )
+
+                behavior_events = behavior_engine.process(
+                    low_level_events,
+                    high_level_events,
+                    world,
+                    now,
+                    voice_events=pending_voice_events,
+                )
+
+                pending_voice_events = []
+
+                memory.record_behavior_events(
+                    behavior_events,
+                    now,
+                )
+
+                for event in behavior_events:
+                    print_behavior_event(event)
+
+                    if event["type"] == "ACTION":
+                        entity_id = event["entity_id"]
+                        person = world.people.get(entity_id)
+
+                        memory_context = memory.snapshot(
+                            entity_id,
+                            now,
+                            within_s=30.0,
+                        )
+
+                        context = {
+                            "behavior_state": behavior_engine.get_state(
+                                entity_id
+                            ),
+                            "posture": (
+                                getattr(person, "posture", None)
+                                if person is not None
+                                else None
+                            ),
+                            "motion": (
+                                getattr(person, "fused_motion", None)
+                                if person is not None
+                                else None
+                            ),
+                            "horizontal_state": (
+                                getattr(person, "horizontal_state", None)
+                                if person is not None
+                                else None
+                            ),
+                            "depth_state": (
+                                getattr(person, "depth_state", None)
+                                if person is not None
+                                else None
+                            ),
+                            "gesture": event.get("gesture"),
+                            "reason": event.get("reason"),
+                            "memory": memory_context,
+                            "dialogue": dialogue.snapshot(
+                                entity_id,
+                                now,
+                            ),
+                        }
+
+                        action_executor.submit(
+                            event,
+                            context=context,
+                        )
+
+                executed_actions = action_executor.update()
+
+                memory.record_executed_actions(
+                    executed_actions,
+                    now,
+                )
+
+                for event in executed_actions:
+                    print_action_execution(event)
+
+                next_perception_time = now + perception_interval
+
+            if cfg.show_window:
+                draw_overlay(
+                    frame,
+                    latest_observations,
+                    world,
+                    behavior_engine,
+                    cfg,
+                )
+
+                cv2.imshow(
+                    cfg.window_name,
+                    frame,
+                )
+
+                key = cv2.waitKey(1) & 0xFF
+
+                if key in (ord("q"), 27):
+                    break
+
+    except KeyboardInterrupt:
+        print("\nStopped by Ctrl+C.")
+
+    finally:
+        mic.stop()
+        cap.release()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()

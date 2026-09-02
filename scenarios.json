@@ -1,0 +1,485 @@
+[
+  {
+    "id": "call_attention_voice",
+    "description": "Person explicitly calls for robot attention.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 1.8,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "PERSON_PRESENT",
+        "VOICE_CALL_ATTENTION"
+      ],
+      "speech": "聞いて"
+    },
+    "expected": {
+      "intent": "CALL_ATTENTION",
+      "action": "ATTEND_PERSON"
+    }
+  },
+  {
+    "id": "call_attention_hand",
+    "description": "Raised hand while facing robot.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 1.5,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": "right_hand_raised"
+      },
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "PERSON_PRESENT",
+        "HAND_RAISED"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "CALL_ATTENTION",
+      "action": "ATTEND_PERSON"
+    }
+  },
+  {
+    "id": "ignore_background_person",
+    "description": "Person is present but not interacting.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 3.2,
+        "facing_robot": false,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "PERSON_PRESENT"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "NO_INTERACTION",
+      "action": "WAIT"
+    }
+  },
+  {
+    "id": "explicit_follow",
+    "description": "User explicitly asks robot to follow.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 1.2,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "PERSON_PRESENT",
+        "USER_SPEAKING"
+      ],
+      "speech": "ついてきて"
+    },
+    "expected": {
+      "intent": "FOLLOW_ME",
+      "action": "FOLLOW_PERSON"
+    }
+  },
+  {
+    "id": "explicit_stop",
+    "description": "User tells robot to stop.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 2.0,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "following"
+      },
+      "events": [
+        "USER_SPEAKING"
+      ],
+      "speech": "止まって"
+    },
+    "expected": {
+      "intent": "STOP",
+      "action": "STOP"
+    }
+  },
+  {
+    "id": "come_here",
+    "description": "User asks robot to approach.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 3.5,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "USER_SPEAKING"
+      ],
+      "speech": "こっち来て"
+    },
+    "expected": {
+      "intent": "COME_HERE",
+      "action": "MOVE_CLOSER"
+    }
+  },
+  {
+    "id": "already_close",
+    "description": "User says come here but is already very close.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 0.55,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "USER_SPEAKING"
+      ],
+      "speech": "こっち来て"
+    },
+    "expected": {
+      "intent": "COME_HERE",
+      "action": "WAIT"
+    }
+  },
+  {
+    "id": "ambiguous_speech",
+    "description": "Speech is too ambiguous to safely infer an action.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 2.0,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "USER_SPEAKING"
+      ],
+      "speech": "あれやって"
+    },
+    "expected": {
+      "intent": "AMBIGUOUS_REQUEST",
+      "action": "ASK_CLARIFICATION"
+    }
+  },
+  {
+    "id": "gesture_conflict_stop",
+    "description": "Gesture suggests approach but speech explicitly says stop; speech wins.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 2.5,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": "beckon"
+      },
+      "robot": {
+        "state": "moving"
+      },
+      "events": [
+        "GESTURE_DETECTED",
+        "USER_SPEAKING"
+      ],
+      "speech": "止まって"
+    },
+    "expected": {
+      "intent": "STOP",
+      "action": "STOP"
+    }
+  },
+  {
+    "id": "attention_timeout_context",
+    "description": "No new interaction after attention timeout.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 2.0,
+        "facing_robot": false,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "ATTENTION_TIMEOUT",
+        "PERSON_PRESENT"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "NO_INTERACTION",
+      "action": "WAIT"
+    }
+  },
+  {
+    "id": "person_left",
+    "description": "Tracked person leaves scene.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": null,
+        "facing_robot": null,
+        "posture": null,
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "PERSON_LEFT"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "PERSON_LEFT",
+      "action": "RETURN_TO_OBSERVING"
+    }
+  },
+  {
+    "id": "approaching_no_request",
+    "description": "Person approaches but gives no explicit request.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 1.9,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "PERSON_PRESENT",
+        "APPROACHING"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "POSSIBLE_INTERACTION",
+      "action": "ATTEND_PERSON"
+    }
+  },
+  {
+    "id": "moving_away",
+    "description": "Person moves away without asking robot to follow.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 3.0,
+        "facing_robot": false,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "PERSON_PRESENT",
+        "MOVING_AWAY"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "NO_INTERACTION",
+      "action": "WAIT"
+    }
+  },
+  {
+    "id": "two_hands_attention",
+    "description": "Both hands raised as a strong attention signal.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 2.2,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": "both_hands_raised"
+      },
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "PERSON_PRESENT",
+        "BOTH_HANDS_RAISED"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "CALL_ATTENTION",
+      "action": "ATTEND_PERSON"
+    }
+  },
+  {
+    "id": "look_at_me",
+    "description": "User asks robot to look at them.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 1.6,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "USER_SPEAKING"
+      ],
+      "speech": "こっち見て"
+    },
+    "expected": {
+      "intent": "LOOK_AT_ME",
+      "action": "LOOK_AT_PERSON"
+    }
+  },
+  {
+    "id": "wait_request",
+    "description": "User asks robot to wait.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 1.7,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "USER_SPEAKING"
+      ],
+      "speech": "ちょっと待って"
+    },
+    "expected": {
+      "intent": "WAIT",
+      "action": "WAIT"
+    }
+  },
+  {
+    "id": "unknown_person_wave",
+    "description": "Unknown person waves; attend but do not infer privileged commands.",
+    "world_state": {
+      "person": {
+        "id": "unknown_person",
+        "distance_m": 2.4,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": "wave"
+      },
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "PERSON_ENTERED",
+        "WAVE_DETECTED"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "CALL_ATTENTION",
+      "action": "ATTEND_PERSON"
+    }
+  },
+  {
+    "id": "no_person_noise",
+    "description": "No person is visible and there is no meaningful speech.",
+    "world_state": {
+      "person": null,
+      "robot": {
+        "state": "observing"
+      },
+      "events": [
+        "BACKGROUND_NOISE"
+      ],
+      "speech": null
+    },
+    "expected": {
+      "intent": "NO_INTERACTION",
+      "action": "WAIT"
+    }
+  },
+  {
+    "id": "contradictory_follow_stop",
+    "description": "User gives contradictory command and system should ask.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 1.5,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "USER_SPEAKING"
+      ],
+      "speech": "ついてきて、いや止まって"
+    },
+    "expected": {
+      "intent": "AMBIGUOUS_REQUEST",
+      "action": "ASK_CLARIFICATION"
+    }
+  },
+  {
+    "id": "simple_greeting",
+    "description": "Greeting should not trigger movement.",
+    "world_state": {
+      "person": {
+        "id": "person_1",
+        "distance_m": 1.4,
+        "facing_robot": true,
+        "posture": "standing",
+        "gesture": null
+      },
+      "robot": {
+        "state": "attending"
+      },
+      "events": [
+        "USER_SPEAKING"
+      ],
+      "speech": "おはよう"
+    },
+    "expected": {
+      "intent": "GREETING",
+      "action": "SPEAK"
+    }
+  }
+]

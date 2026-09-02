@@ -1,0 +1,218 @@
+from __future__ import annotations
+
+import json
+import os
+import queue
+import threading
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class LLMJob:
+    entity_id: str
+    text: str
+    context: dict
+    timestamp: float
+
+
+class LLMWorker:
+    """
+    Non-blocking local Ollama responder.
+
+    Input:
+        free-form user utterance + dialogue/world context
+
+    Output:
+        LLM_REPLY
+        LLM_ERROR
+
+    The camera/perception loop never waits for the LLM.
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str = "http://127.0.0.1:11434",
+        timeout_s: float = 30.0,
+    ):
+        self.model = (
+            model
+            or os.environ.get("INDOOR_AI_LLM_MODEL")
+            or "qwen2.5:0.5b"
+        )
+        self.base_url = base_url.rstrip("/")
+        self.timeout_s = timeout_s
+
+        self._jobs: queue.Queue[LLMJob | None] = queue.Queue(
+            maxsize=4
+        )
+        self._results: queue.Queue[dict] = queue.Queue(
+            maxsize=16
+        )
+
+        self._worker = threading.Thread(
+            target=self._run,
+            name="llm-worker",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def submit(
+        self,
+        entity_id: str,
+        text: str,
+        context: dict,
+        timestamp: float,
+    ) -> bool:
+        try:
+            self._jobs.put_nowait(
+                LLMJob(
+                    entity_id=entity_id,
+                    text=text,
+                    context=dict(context),
+                    timestamp=timestamp,
+                )
+            )
+            return True
+        except queue.Full:
+            return False
+
+    def update(self) -> list[dict]:
+        results: list[dict] = []
+
+        while True:
+            try:
+                results.append(
+                    self._results.get_nowait()
+                )
+            except queue.Empty:
+                break
+
+        return results
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
+
+            if job is None:
+                self._jobs.task_done()
+                return
+
+            try:
+                result = self._generate(job)
+            except Exception as exc:
+                result = {
+                    "type": "LLM_ERROR",
+                    "entity_id": job.entity_id,
+                    "timestamp": job.timestamp,
+                    "error": str(exc),
+                }
+
+            try:
+                self._results.put_nowait(result)
+            except queue.Full:
+                pass
+
+            self._jobs.task_done()
+
+    def _generate(self, job: LLMJob) -> dict:
+        dialogue = job.context.get("dialogue") or {}
+        memory = job.context.get("memory") or {}
+        posture = job.context.get("posture")
+        motion = job.context.get("motion")
+
+        system_prompt = (
+            "You are the voice of a small indoor AI robot. "
+            "Reply naturally in Japanese. "
+            "Keep the answer very short: normally one sentence, "
+            "at most two short sentences. "
+            "Do not mention internal states, tracking, cameras, models, "
+            "or software. "
+            "Use the supplied context only when it is useful."
+        )
+
+        context_text = (
+            f"behavior_state={job.context.get('behavior_state')}\n"
+            f"posture={posture}\n"
+            f"motion={motion}\n"
+            f"dialogue_turns={dialogue.get('turn_count')}\n"
+            f"last_user_text={dialogue.get('last_user_text')}\n"
+            f"last_speech={memory.get('last_speech')}\n"
+        )
+
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "system",
+                    "content": "Current context:\n" + context_text,
+                },
+                {
+                    "role": "user",
+                    "content": job.text,
+                },
+            ],
+            "options": {
+                "temperature": 0.4,
+                "num_predict": 48,
+                "num_thread": 4,
+            },
+            "keep_alive": "10m",
+        }
+
+        request = urllib.request.Request(
+            f"{self.base_url}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.timeout_s,
+            ) as response:
+                data = json.loads(
+                    response.read().decode("utf-8")
+                )
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+            raise RuntimeError(
+                f"Ollama HTTP {exc.code}: {body}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                "Cannot reach Ollama at "
+                f"{self.base_url}. Is `ollama serve` running?"
+            ) from exc
+
+        text = (
+            data.get("message", {})
+            .get("content", "")
+            .strip()
+        )
+
+        if not text:
+            raise RuntimeError(
+                "Ollama returned an empty reply."
+            )
+
+        return {
+            "type": "LLM_REPLY",
+            "entity_id": job.entity_id,
+            "timestamp": job.timestamp,
+            "text": text,
+            "model": self.model,
+        }
