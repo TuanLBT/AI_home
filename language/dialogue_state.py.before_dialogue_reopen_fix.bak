@@ -84,38 +84,24 @@ class DialogueStateManager:
         if entity_id is None:
             return []
 
-        session = self.sessions.setdefault(
-            entity_id,
-            DialogueSession(),
-        )
+        session = self.sessions.get(entity_id)
 
-        outputs: list[dict] = []
-
-        if not session.active:
-            session.active = True
-            session.started_at = now
-
-            outputs.append({
-                "type": "DIALOGUE_STARTED",
-                "entity_id": entity_id,
-                "timestamp": now,
-            })
+        if session is None or not session.active:
+            return []
 
         session.last_activity_at = now
         session.last_user_text = intent.text
         session.last_intent = "UNKNOWN"
         session.turn_count += 1
 
-        outputs.append({
+        return [{
             "type": "VOICE_UTTERANCE",
             "entity_id": entity_id,
             "intent": "UNKNOWN",
             "text": intent.text,
             "confidence": intent.confidence,
             "timestamp": now,
-        })
-
-        return outputs
+        }]
 
     def update(
         self,

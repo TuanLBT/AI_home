@@ -30,7 +30,7 @@ class ASRWorker:
 
     def __init__(
         self,
-        model_size: str = "small",
+        model_size: str = "base",
         language: str = "ja",
         device: str = "cpu",
         compute_type: str = "int8",
@@ -108,13 +108,9 @@ class ASRWorker:
                 segments, info = self.model.transcribe(
                     job.audio,
                     language=self.language,
-                    beam_size=3,
+                    beam_size=1,
                     vad_filter=False,
                     condition_on_previous_text=False,
-                    initial_prompt=(
-                        "これは室内AIロボットとの自然な日本語会話です。"
-                        "短い質問、呼びかけ、日常会話を正確に文字起こししてください。"
-                    ),
                 )
 
                 text = "".join(

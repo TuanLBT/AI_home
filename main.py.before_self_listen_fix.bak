@@ -484,10 +484,6 @@ def main():
 
             now = time.monotonic()
 
-            mic.set_suppressed(
-                action_executor.speech.listen_blocked
-            )
-
             audio_events = mic.update()
 
             for event in audio_events:

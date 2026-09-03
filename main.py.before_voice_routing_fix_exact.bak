@@ -484,10 +484,6 @@ def main():
 
             now = time.monotonic()
 
-            mic.set_suppressed(
-                action_executor.speech.listen_blocked
-            )
-
             audio_events = mic.update()
 
             for event in audio_events:
@@ -573,28 +569,24 @@ def main():
                                     ">>> LLM: queue full, utterance dropped"
                                 )
 
+                            brain_accepted = brain.submit(
+                                entity_id=entity_id,
+                                world_state=build_brain_snapshot(
+                                    world,
+                                    behavior_engine,
+                                    entity_id,
+                                    speech=voice_event["text"],
+                                    trigger=voice_event,
+                                ),
+                                timestamp=now,
+                            )
+
+                            if not brain_accepted:
+                                print(
+                                    ">>> BRAIN: queue full, shadow job dropped"
+                                )
                         else:
                             print_voice_event(voice_event)
-
-                            entity_id = voice_event.get("entity_id")
-
-                            if entity_id is not None:
-                                brain_accepted = brain.submit(
-                                    entity_id=entity_id,
-                                    world_state=build_brain_snapshot(
-                                        world,
-                                        behavior_engine,
-                                        entity_id,
-                                        speech=voice_event.get("text"),
-                                        trigger=voice_event,
-                                    ),
-                                    timestamp=now,
-                                )
-
-                                if not brain_accepted:
-                                    print(
-                                        ">>> BRAIN: queue full, shadow job dropped"
-                                    )
 
                         if voice_event.get("entity_id") is not None:
                             pending_voice_events.append(

@@ -20,7 +20,6 @@ from language.intent_engine import IntentEngine
 from language.voice_event_engine import VoiceEventEngine
 from language.dialogue_state import DialogueStateManager
 from language.llm_worker import LLMWorker
-from brain.brain_worker import BrainWorker
 
 
 SKELETON = [
@@ -257,55 +256,6 @@ def print_llm_event(event: dict):
         )
 
 
-def print_brain_event(event: dict):
-    if event["type"] == "BRAIN_DECISION":
-        proposal = event.get("proposal") or {}
-
-        print(
-            f'>>> BRAIN {event["entity_id"]}: '
-            f'proposal={proposal.get("action")} '
-            f'final={event.get("final_action")} '
-            f'approved={event.get("approved")} '
-            f'reason={event.get("reason")}'
-        )
-    else:
-        print(
-            f'>>> BRAIN ERROR {event["entity_id"]}: '
-            f'{event.get("error")}'
-        )
-
-
-def build_brain_snapshot(
-    world: WorldState,
-    behavior_engine: BehaviorEngine,
-    entity_id: str,
-    *,
-    speech: str | None = None,
-    trigger: dict | None = None,
-) -> dict:
-    person = world.people.get(entity_id)
-
-    person_state = {
-        "id": entity_id,
-        "present": getattr(person, "present", False) if person is not None else False,
-        "posture": getattr(person, "posture", None) if person is not None else None,
-        "motion": getattr(person, "fused_motion", None) if person is not None else None,
-        "horizontal_state": getattr(person, "horizontal_state", None) if person is not None else None,
-        "depth_state": getattr(person, "depth_state", None) if person is not None else None,
-        "gestures": sorted(getattr(person, "active_gestures", set())) if person is not None else [],
-    }
-
-    return {
-        "robot": {
-            "state": behavior_engine.get_state(entity_id),
-        },
-        "person": person_state,
-        "speech": speech,
-        "trigger": dict(trigger or {}),
-        "feedback": world.get_action_feedback(entity_id),
-    }
-
-
 def print_dialogue_event(event: dict):
     if event["type"] == "DIALOGUE_STARTED":
         print(
@@ -455,13 +405,6 @@ def main():
 
     llm = LLMWorker()
 
-    brain = BrainWorker(
-        host="http://192.168.128.120:11434",
-        model="qwen3:8b",
-        timeout=30.0,
-        max_pending=1,
-    )
-
     pending_voice_events: list[dict] = []
 
     perception_interval = 1.0 / cfg.perception_fps
@@ -483,10 +426,6 @@ def main():
                 break
 
             now = time.monotonic()
-
-            mic.set_suppressed(
-                action_executor.speech.listen_blocked
-            )
 
             audio_events = mic.update()
 
@@ -572,29 +511,8 @@ def main():
                                 print(
                                     ">>> LLM: queue full, utterance dropped"
                                 )
-
                         else:
                             print_voice_event(voice_event)
-
-                            entity_id = voice_event.get("entity_id")
-
-                            if entity_id is not None:
-                                brain_accepted = brain.submit(
-                                    entity_id=entity_id,
-                                    world_state=build_brain_snapshot(
-                                        world,
-                                        behavior_engine,
-                                        entity_id,
-                                        speech=voice_event.get("text"),
-                                        trigger=voice_event,
-                                    ),
-                                    timestamp=now,
-                                )
-
-                                if not brain_accepted:
-                                    print(
-                                        ">>> BRAIN: queue full, shadow job dropped"
-                                    )
 
                         if voice_event.get("entity_id") is not None:
                             pending_voice_events.append(
@@ -611,9 +529,6 @@ def main():
 
             for dialogue_event in dialogue.update(now):
                 print_dialogue_event(dialogue_event)
-
-            for brain_event in brain.update():
-                print_brain_event(brain_event)
 
             for llm_event in llm.update():
                 print_llm_event(llm_event)
@@ -695,25 +610,6 @@ def main():
 
                 for event in high_level_events:
                     print_high_level_event(event)
-
-                    entity_id = event.get("entity_id")
-
-                    if entity_id is not None:
-                        brain_accepted = brain.submit(
-                            entity_id=entity_id,
-                            world_state=build_brain_snapshot(
-                                world,
-                                behavior_engine,
-                                entity_id,
-                                trigger=event,
-                            ),
-                            timestamp=now,
-                        )
-
-                        if not brain_accepted:
-                            print(
-                                ">>> BRAIN: queue full, shadow job dropped"
-                            )
 
                 memory.record_high_level_events(
                     high_level_events,
@@ -829,7 +725,6 @@ def main():
         print("\nStopped by Ctrl+C.")
 
     finally:
-        brain.close()
         mic.stop()
         cap.release()
         cv2.destroyAllWindows()

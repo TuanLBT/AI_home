@@ -4,7 +4,6 @@ import queue
 import shutil
 import subprocess
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,31 +42,12 @@ class SpeechAdapter:
         self.backend = self._find_backend()
 
         self._speech_queue: queue.Queue[str | None] = queue.Queue(maxsize=8)
-
-        self._state_lock = threading.Lock()
-        self._speaking = False
-        self._listen_blocked_until = 0.0
-        self.listen_cooldown_s = 0.8
-
         self._worker = threading.Thread(
             target=self._speech_worker,
             name="tts-worker",
             daemon=True,
         )
         self._worker.start()
-
-    @property
-    def is_speaking(self) -> bool:
-        with self._state_lock:
-            return self._speaking
-
-    @property
-    def listen_blocked(self) -> bool:
-        with self._state_lock:
-            return (
-                self._speaking
-                or time.monotonic() < self._listen_blocked_until
-            )
 
     def _piper_ready(self) -> bool:
         return (
@@ -128,18 +108,9 @@ class SpeechAdapter:
                 self._speech_queue.task_done()
                 return
 
-            with self._state_lock:
-                self._speaking = True
-
             try:
                 self._speak_blocking(text)
             finally:
-                with self._state_lock:
-                    self._speaking = False
-                    self._listen_blocked_until = (
-                        time.monotonic() + self.listen_cooldown_s
-                    )
-
                 self._speech_queue.task_done()
 
     def _speak_blocking(self, text: str) -> None:

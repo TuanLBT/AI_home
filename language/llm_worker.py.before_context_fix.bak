@@ -126,9 +126,6 @@ class LLMWorker:
         system_prompt = (
             "You are Indoor AI, the voice of a small indoor AI robot. "
             "Reply naturally and directly in Japanese. "
-            "Answer the current user utterance directly and prioritize it over prior context. "
-            "Do not repeat your previous reply unless the user explicitly asks you to repeat it. "
-            "Do not answer with your name unless the user is actually asking your name or identity. "
             "Answer the user's actual question instead of giving generic replies. "
             "If asked your name, say that your name is Indoor AI. "
             "Keep answers short: normally one sentence, "
@@ -145,6 +142,7 @@ class LLMWorker:
             f"motion={motion}\n"
             f"dialogue_turns={dialogue.get('turn_count')}\n"
             f"last_user_text={dialogue.get('last_user_text')}\n"
+            f"last_speech={memory.get('last_speech')}\n"
         )
 
         payload = {

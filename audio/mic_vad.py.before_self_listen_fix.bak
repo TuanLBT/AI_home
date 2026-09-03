@@ -92,35 +92,9 @@ class MicVAD:
         self._voice_active = False
         self._segment_chunks: list[np.ndarray] = []
 
-        self._suppressed = False
-
     @property
     def voice_active(self) -> bool:
         return self._voice_active
-
-    @property
-    def suppressed(self) -> bool:
-        return self._suppressed
-
-    def set_suppressed(self, suppressed: bool) -> None:
-        suppressed = bool(suppressed)
-
-        if suppressed == self._suppressed:
-            return
-
-        self._suppressed = suppressed
-
-        if suppressed:
-            self._voice_active = False
-            self._segment_chunks = []
-            self._pre_roll.clear()
-            self.vad.reset_states()
-
-            while True:
-                try:
-                    self._audio_queue.get_nowait()
-                except queue.Empty:
-                    break
 
     def start(self) -> None:
         if self._stream is not None:
@@ -255,9 +229,6 @@ class MicVAD:
         status,
     ) -> None:
         if frames == 0:
-            return
-
-        if self._suppressed:
             return
 
         samples = np.asarray(

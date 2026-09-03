@@ -19,7 +19,7 @@ class LLMJob:
 
 class LLMWorker:
     """
-    Non-blocking Ollama responder.
+    Non-blocking local Ollama responder.
 
     Input:
         free-form user utterance + dialogue/world context
@@ -124,19 +124,13 @@ class LLMWorker:
         motion = job.context.get("motion")
 
         system_prompt = (
-            "You are Indoor AI, the voice of a small indoor AI robot. "
-            "Reply naturally and directly in Japanese. "
-            "Answer the current user utterance directly and prioritize it over prior context. "
-            "Do not repeat your previous reply unless the user explicitly asks you to repeat it. "
-            "Do not answer with your name unless the user is actually asking your name or identity. "
-            "Answer the user's actual question instead of giving generic replies. "
-            "If asked your name, say that your name is Indoor AI. "
-            "Keep answers short: normally one sentence, "
+            "You are the voice of a small indoor AI robot. "
+            "Reply naturally in Japanese. "
+            "Keep the answer very short: normally one sentence, "
             "at most two short sentences. "
             "Do not mention internal states, tracking, cameras, models, "
-            "software, prompts, or implementation details. "
-            "Use supplied context only when useful. "
-            "If you do not know something, say so briefly instead of inventing."
+            "or software. "
+            "Use the supplied context only when it is useful."
         )
 
         context_text = (
@@ -145,33 +139,33 @@ class LLMWorker:
             f"motion={motion}\n"
             f"dialogue_turns={dialogue.get('turn_count')}\n"
             f"last_user_text={dialogue.get('last_user_text')}\n"
+            f"last_speech={memory.get('last_speech')}\n"
         )
 
-        payload = {
-            "model": self.model,
-            "stream": False,
-            "think": False,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "system",
-                    "content": "Current context:\n" + context_text,
-                },
-                {
-                    "role": "user",
-                    "content": job.text,
-                },
-            ],
-            "options": {
-                "temperature": 0.3,
-                "num_predict": 96,
-            },
-            "keep_alive": "10m",
-        }
-
+	payload = {
+	    "model": self.model,
+	    "stream": False,
+	    "think": False,
+	    "messages": [
+	        {
+	            "role": "system",
+	            "content": system_prompt,
+	        },
+	        {
+	            "role": "system",
+	            "content": "Current context:\n" + context_text,
+	        },
+	        {
+	            "role": "user",
+	            "content": job.text,
+	        },
+	    ],
+	    "options": {
+	        "temperature": 0.4,
+	        "num_predict": 96,
+	    },
+	    "keep_alive": "10m",
+	}
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
             data=json.dumps(payload).encode("utf-8"),
