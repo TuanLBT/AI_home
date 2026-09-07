@@ -22,6 +22,8 @@ from language.voice_event_engine import VoiceEventEngine
 from language.dialogue_state import DialogueStateManager
 from language.llm_worker import LLMWorker
 from brain.brain_worker import BrainWorker
+from learning.pose_concept_learner import PoseConceptLearner
+from learning.pose_concept_observer import PoseConceptObserver
 from perception.visual_facts import enrich_person_visual_facts
 from perception.object_worker import ObjectWorker
 from perception.object_grounding import apply_held_object_grounding
@@ -462,6 +464,18 @@ def main():
     )
     experiences = ExperienceStore()
 
+    learned_pose_observer = None
+
+    try:
+        pose_learner = PoseConceptLearner.from_jsonl()
+        learned_pose_observer = PoseConceptObserver(pose_learner)
+        print(
+            "Learned pose shadow ready: "
+            f"{pose_learner.summary()}"
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Learned pose shadow disabled: {exc}")
+
     mic = MicVAD()
     mic.start()
 
@@ -716,6 +730,29 @@ def main():
                     latest_observations,
                     now=now,
                 )
+
+                if learned_pose_observer is not None:
+                    learned_events = learned_pose_observer.update(
+                        latest_observations,
+                        now,
+                    )
+
+                    for learned_event in learned_events:
+                        distances = learned_event["distances"]
+                        distance_text = ", ".join(
+                            f"{label}={distance:.2f}"
+                            for label, distance in sorted(
+                                distances.items()
+                            )
+                        )
+                        print(
+                            f'>>> LEARNED SHADOW '
+                            f'{learned_event["entity_id"]}: '
+                            f'{learned_event["label"]} '
+                            f'(confidence='
+                            f'{learned_event["confidence"]:.2f}; '
+                            f'{distance_text})'
+                        )
 
                 apply_held_object_grounding(
                     world,
