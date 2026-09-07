@@ -117,10 +117,24 @@ class ASRWorker:
                     ),
                 )
 
+                segment_list = list(segments)
+
                 text = "".join(
                     segment.text
-                    for segment in segments
+                    for segment in segment_list
                 ).strip()
+
+                avg_logprob = (
+                    sum(segment.avg_logprob for segment in segment_list)
+                    / len(segment_list)
+                    if segment_list
+                    else None
+                )
+                no_speech_prob = (
+                    max(segment.no_speech_prob for segment in segment_list)
+                    if segment_list
+                    else None
+                )
 
                 result = {
                     "type": "ASR_TEXT",
@@ -130,6 +144,9 @@ class ASRWorker:
                     "language_probability": (
                         info.language_probability
                     ),
+                    "avg_logprob": avg_logprob,
+                    "no_speech_prob": no_speech_prob,
+                    "segment_count": len(segment_list),
                 }
 
             except Exception as exc:
