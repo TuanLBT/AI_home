@@ -104,9 +104,9 @@ def infer_gestures(points, confs, threshold=0.35) -> set[str]:
         # down. This covers a fist/hand raised beside the head without making
         # an ordinary resting forearm count.
         forearm_up = (
-            wrist_y <= shoulder_y - torso_size * 0.05
+            wrist_y <= shoulder_y + torso_size * 0.15
             and wrist_y <= elbow_y - torso_size * 0.20
-            and elbow_y <= shoulder_y + torso_size * 0.65
+            and elbow_y <= shoulder_y + torso_size * 0.75
         )
 
         left_raised = whole_arm_raised or forearm_up
@@ -123,9 +123,9 @@ def infer_gestures(points, confs, threshold=0.35) -> set[str]:
         )
 
         forearm_up = (
-            wrist_y <= shoulder_y - torso_size * 0.05
+            wrist_y <= shoulder_y + torso_size * 0.15
             and wrist_y <= elbow_y - torso_size * 0.20
-            and elbow_y <= shoulder_y + torso_size * 0.65
+            and elbow_y <= shoulder_y + torso_size * 0.75
         )
 
         right_raised = whole_arm_raised or forearm_up
