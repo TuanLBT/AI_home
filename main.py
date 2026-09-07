@@ -22,6 +22,9 @@ from language.voice_event_engine import VoiceEventEngine
 from language.dialogue_state import DialogueStateManager
 from language.llm_worker import LLMWorker
 from brain.brain_worker import BrainWorker
+from perception.visual_facts import enrich_person_visual_facts
+from perception.object_worker import ObjectWorker
+from perception.object_grounding import apply_held_object_grounding
 
 
 SKELETON = [
@@ -416,6 +419,13 @@ def main():
         device=cfg.device,
     )
 
+    object_worker = ObjectWorker(
+        model_name="yolo11n.pt",
+        confidence=0.20,
+        imgsz=640,
+        device="cpu",
+    )
+
     world = WorldState(
         left_timeout_s=cfg.left_timeout_s,
         present_log_interval_s=cfg.present_log_interval_s,
@@ -470,6 +480,10 @@ def main():
     next_perception_time = 0.0
     latest_observations = []
 
+    object_interval_s = 1.00
+    next_object_time = 0.0
+    latest_object_detections: list[dict] = []
+
     print("M1 + Event + Behavior State Machine running.")
     print(f"Device: {cfg.device}")
     print(f"AI perception rate: {cfg.perception_fps:.1f} FPS")
@@ -485,6 +499,18 @@ def main():
                 break
 
             now = time.monotonic()
+
+            for object_event in object_worker.update():
+                if object_event["type"] == "OBJECT_DETECTIONS":
+                    latest_object_detections = object_event["detections"]
+                else:
+                    print(
+                        f'>>> OBJECT ERROR: {object_event.get("error")}'
+                    )
+
+            if now >= next_object_time:
+                object_worker.submit(frame, timestamp=now)
+                next_object_time = now + object_interval_s
 
             mic.set_suppressed(
                 action_executor.speech.listen_blocked
@@ -551,6 +577,11 @@ def main():
                                     getattr(person, "fused_motion", None)
                                     if person is not None
                                     else None
+                                ),
+                                "visual": (
+                                    dict(getattr(person, "visual_facts", {}) or {})
+                                    if person is not None
+                                    else {}
                                 ),
                                 "memory": memory.snapshot(
                                     entity_id,
@@ -678,9 +709,21 @@ def main():
             if now >= next_perception_time:
                 latest_observations = perception.process(frame)
 
+                enrich_person_visual_facts(
+                    frame,
+                    latest_observations,
+                    keypoint_confidence=cfg.keypoint_confidence,
+                )
+
                 low_level_events = world.update(
                     latest_observations,
                     now=now,
+                )
+
+                apply_held_object_grounding(
+                    world,
+                    latest_object_detections,
+                    wrist_confidence=cfg.keypoint_confidence,
                 )
 
                 for event in low_level_events:
@@ -834,6 +877,7 @@ def main():
         print("\nStopped by Ctrl+C.")
 
     finally:
+        object_worker.close()
         brain.close()
         mic.stop()
         cap.release()

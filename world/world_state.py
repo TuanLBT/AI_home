@@ -141,6 +141,9 @@ class WorldState:
             person.keypoint_confidences = obs.data.get(
                 "keypoint_confidences", []
             )
+            person.visual_facts = dict(
+                obs.data.get("visual_facts") or {}
+            )
 
             events.extend(self._update_gestures(person, now))
             events.extend(self._update_posture(person, now))

@@ -38,6 +38,8 @@ class PersonEntity:
 
     fused_motion: str = "stationary"
 
+    visual_facts: dict[str, object] = field(default_factory=dict)
+
     @property
     def seen_duration(self) -> float:
         return max(0.0, self.last_seen - self.first_seen)

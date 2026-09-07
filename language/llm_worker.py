@@ -122,6 +122,7 @@ class LLMWorker:
         memory = job.context.get("memory") or {}
         posture = job.context.get("posture")
         motion = job.context.get("motion")
+        visual = job.context.get("visual") or {}
 
         system_prompt = (
             "You are Indoor AI, the voice of a small indoor AI robot. "
@@ -136,6 +137,10 @@ class LLMWorker:
             "Do not mention internal states, tracking, cameras, models, "
             "software, prompts, or implementation details. "
             "Use supplied context only when useful. "
+            "For questions about what you can currently see, only claim visual facts "
+            "that are explicitly present in the supplied visual context. "
+            "Never guess a visual detail that is missing or unavailable. "
+            "If the requested visual fact is unavailable, say briefly that you cannot determine it right now. "
             "If you do not know something, say so briefly instead of inventing."
         )
 
@@ -143,6 +148,7 @@ class LLMWorker:
             f"behavior_state={job.context.get('behavior_state')}\n"
             f"posture={posture}\n"
             f"motion={motion}\n"
+            f"visual={visual}\n"
             f"dialogue_turns={dialogue.get('turn_count')}\n"
             f"last_user_text={dialogue.get('last_user_text')}\n"
         )
