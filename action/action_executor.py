@@ -158,6 +158,11 @@ class ActionExecutor:
             "reason": request.reason,
             "timestamp": request.timestamp,
             "context": request.context,
+            "source": request.source,
+            "intent": request.intent,
+            "confidence": request.confidence,
+            "target_id": request.target_id,
+            "parameters": request.parameters,
 
             # Closed-loop result fields
             "request_id": result.request_id,
