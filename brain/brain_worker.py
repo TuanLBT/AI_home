@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import queue
 import threading
@@ -81,7 +82,7 @@ class BrainWorker:
         """
         job = BrainJob(
             entity_id=entity_id,
-            world_state=dict(world_state),
+            world_state=copy.deepcopy(world_state),
             timestamp=timestamp,
         )
 
@@ -151,6 +152,8 @@ class BrainWorker:
                     "reason": "BRAIN_WORKER_ERROR",
                     "error": str(exc),
                 }
+
+            result["world_state"] = job.world_state
 
             try:
                 self._results.put_nowait(
