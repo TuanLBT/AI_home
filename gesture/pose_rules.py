@@ -93,22 +93,42 @@ def infer_gestures(points, confs, threshold=0.35) -> set[str]:
         shoulder_y = points[LEFT_SHOULDER][1]
         elbow_y = points[LEFT_ELBOW][1]
 
-        left_raised = (
+        whole_arm_raised = (
             wrist_y <= shoulder_y + shoulder_tolerance
             and elbow_y <= shoulder_y + elbow_tolerance
             and wrist_y <= elbow_y + wrist_elbow_tolerance
         )
+
+        # A bent forearm can also be an intentional hand raise: the wrist is
+        # clearly above both shoulder and elbow while the upper arm remains
+        # down. This covers a fist/hand raised beside the head without making
+        # an ordinary resting forearm count.
+        forearm_up = (
+            wrist_y <= shoulder_y - torso_size * 0.05
+            and wrist_y <= elbow_y - torso_size * 0.20
+            and elbow_y <= shoulder_y + torso_size * 0.65
+        )
+
+        left_raised = whole_arm_raised or forearm_up
 
     if right_ok:
         wrist_y = points[RIGHT_WRIST][1]
         shoulder_y = points[RIGHT_SHOULDER][1]
         elbow_y = points[RIGHT_ELBOW][1]
 
-        right_raised = (
+        whole_arm_raised = (
             wrist_y <= shoulder_y + shoulder_tolerance
             and elbow_y <= shoulder_y + elbow_tolerance
             and wrist_y <= elbow_y + wrist_elbow_tolerance
         )
+
+        forearm_up = (
+            wrist_y <= shoulder_y - torso_size * 0.05
+            and wrist_y <= elbow_y - torso_size * 0.20
+            and elbow_y <= shoulder_y + torso_size * 0.65
+        )
+
+        right_raised = whole_arm_raised or forearm_up
 
     if left_raised:
         gestures.add("LEFT_HAND_RAISED")
