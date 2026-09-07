@@ -14,6 +14,7 @@ from world.event_engine import EventEngine
 from behavior.behavior_engine import BehaviorEngine
 from action.action_executor import ActionExecutor
 from memory.interaction_memory import InteractionMemory
+from memory.experience_store import ExperienceStore
 from audio.mic_vad import MicVAD
 from audio.asr_worker import ASRWorker
 from language.intent_engine import IntentEngine
@@ -436,6 +437,7 @@ def main():
         retention_s=60.0,
         max_items_per_person=100,
     )
+    experiences = ExperienceStore()
 
     mic = MicVAD()
     mic.start()
@@ -614,6 +616,7 @@ def main():
 
             for brain_event in brain.update():
                 print_brain_event(brain_event)
+                experiences.record_brain_decision(brain_event)
 
             for llm_event in llm.update():
                 print_llm_event(llm_event)
@@ -667,6 +670,7 @@ def main():
                         executed_actions,
                         now,
                     )
+                    experiences.record_action_results(executed_actions)
 
                     for executed in executed_actions:
                         print_action_execution(executed)
@@ -800,6 +804,7 @@ def main():
                     executed_actions,
                     now,
                 )
+                experiences.record_action_results(executed_actions)
 
                 for event in executed_actions:
                     print_action_execution(event)
