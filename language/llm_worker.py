@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import queue
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 
 @dataclass(slots=True)
 class LLMJob:
+    request_id: int
     entity_id: str
     text: str
     context: dict
@@ -46,11 +48,16 @@ class LLMWorker:
         self.timeout_s = timeout_s
 
         self._jobs: queue.Queue[LLMJob | None] = queue.Queue(
-            maxsize=4
+            maxsize=1
         )
         self._results: queue.Queue[dict] = queue.Queue(
             maxsize=16
         )
+
+        self._submit_lock = threading.Lock()
+        self._request_counter = 0
+        self._latest_request_id: dict[str, int] = {}
+        self._closed = False
 
         self._worker = threading.Thread(
             target=self._run,
@@ -66,18 +73,63 @@ class LLMWorker:
         context: dict,
         timestamp: float,
     ) -> bool:
-        try:
-            self._jobs.put_nowait(
-                LLMJob(
-                    entity_id=entity_id,
-                    text=text,
-                    context=dict(context),
-                    timestamp=timestamp,
-                )
+        with self._submit_lock:
+            if self._closed:
+                return False
+
+            self._request_counter += 1
+            request_id = self._request_counter
+            self._latest_request_id[entity_id] = request_id
+
+            job = LLMJob(
+                request_id=request_id,
+                entity_id=entity_id,
+                text=text,
+                context=copy.deepcopy(context),
+                timestamp=timestamp,
             )
-            return True
-        except queue.Full:
-            return False
+
+            try:
+                self._jobs.put_nowait(job)
+                return True
+            except queue.Full:
+                # Keep only the newest pending utterance. An in-flight request
+                # cannot be cancelled safely, but its result is discarded by
+                # _is_latest() when a newer utterance exists.
+                try:
+                    self._jobs.get_nowait()
+                    self._jobs.task_done()
+                except queue.Empty:
+                    pass
+
+                try:
+                    self._jobs.put_nowait(job)
+                    return True
+                except queue.Full:
+                    return False
+
+    def close(self) -> None:
+        with self._submit_lock:
+            self._closed = True
+
+            try:
+                self._jobs.get_nowait()
+                self._jobs.task_done()
+            except queue.Empty:
+                pass
+
+            try:
+                self._jobs.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def _is_latest(self, job: LLMJob) -> bool:
+        with self._submit_lock:
+            return (
+                not self._closed
+                and self._latest_request_id.get(job.entity_id)
+                == job.request_id
+            )
 
     def update(self) -> list[dict]:
         results: list[dict] = []
@@ -100,20 +152,27 @@ class LLMWorker:
                 self._jobs.task_done()
                 return
 
+            if not self._is_latest(job):
+                self._jobs.task_done()
+                continue
+
             try:
                 result = self._generate(job)
             except Exception as exc:
                 result = {
                     "type": "LLM_ERROR",
+                    "request_id": job.request_id,
                     "entity_id": job.entity_id,
                     "timestamp": job.timestamp,
+                    "context": job.context,
                     "error": str(exc),
                 }
 
-            try:
-                self._results.put_nowait(result)
-            except queue.Full:
-                pass
+            if self._is_latest(job):
+                try:
+                    self._results.put_nowait(result)
+                except queue.Full:
+                    pass
 
             self._jobs.task_done()
 
@@ -222,8 +281,10 @@ class LLMWorker:
 
         return {
             "type": "LLM_REPLY",
+            "request_id": job.request_id,
             "entity_id": job.entity_id,
             "timestamp": job.timestamp,
+            "context": job.context,
             "text": text,
             "model": self.model,
         }
