@@ -228,7 +228,10 @@ def print_audio_event(event: dict):
     if event["type"] == "SPEECH_SEGMENT_READY":
         print(
             f'>>> AUDIO: SPEECH_SEGMENT_READY '
-            f'({event["duration_s"]:.2f}s)'
+            f'({event["duration_s"]:.2f}s, '
+            f'rms={event.get("rms", 0.0):.3f}, '
+            f'peak={event.get("peak", 0.0):.3f}, '
+            f'forced={event.get("forced", False)})'
         )
         return
 
@@ -240,8 +243,18 @@ def print_audio_event(event: dict):
 
 def print_asr_event(event: dict):
     if event["type"] == "ASR_TEXT":
+        avg_logprob = event.get("avg_logprob")
+        no_speech_prob = event.get("no_speech_prob")
+        quality = ""
+
+        if avg_logprob is not None and no_speech_prob is not None:
+            quality = (
+                f" [logp={avg_logprob:.2f}, "
+                f"no_speech={no_speech_prob:.2f}]"
+            )
+
         print(
-            f'>>> ASR: {event["text"]}'
+            f'>>> ASR: {event["text"]}{quality}'
         )
     else:
         print(
