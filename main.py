@@ -654,32 +654,9 @@ def main():
 
                 if llm_event["type"] == "LLM_REPLY":
                     entity_id = llm_event["entity_id"]
-                    person = world.people.get(entity_id)
-
-                    context = {
-                        "behavior_state": behavior_engine.get_state(
-                            entity_id
-                        ),
-                        "posture": (
-                            getattr(person, "posture", None)
-                            if person is not None
-                            else None
-                        ),
-                        "motion": (
-                            getattr(person, "fused_motion", None)
-                            if person is not None
-                            else None
-                        ),
-                        "memory": memory.snapshot(
-                            entity_id,
-                            now,
-                            within_s=30.0,
-                        ),
-                        "dialogue": dialogue.snapshot(
-                            entity_id,
-                            now,
-                        ),
-                    }
+                    context = dict(
+                        llm_event.get("context") or {}
+                    )
 
                     action_executor.submit(
                         {
@@ -688,7 +665,14 @@ def main():
                             "action": "speak_text",
                             "speech_text": llm_event["text"],
                             "reason": "LLM_REPLY",
-                            "timestamp": now,
+                            "timestamp": llm_event["timestamp"],
+                            "source": "llm",
+                            "intent": "RESPOND_TO_UTTERANCE",
+                            "parameters": {
+                                "llm_request_id": llm_event.get(
+                                    "request_id"
+                                ),
+                            },
                         },
                         context=context,
                     )
@@ -877,6 +861,7 @@ def main():
         print("\nStopped by Ctrl+C.")
 
     finally:
+        llm.close()
         object_worker.close()
         brain.close()
         mic.stop()
