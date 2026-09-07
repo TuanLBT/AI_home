@@ -16,8 +16,9 @@ class Config:
     left_timeout_s: float = 1.5
     present_log_interval_s: float = 2.0
 
-    # Gesture must be stable for this many perception cycles before event.
-    gesture_confirm_frames: int = 2
+    # At 30 FPS this is about 0.33 s. Two frames was only 0.07 s and
+    # allowed momentary keypoint jumps to become real gesture events.
+    gesture_confirm_frames: int = 10
 
     show_window: bool = True
     window_name: str = "Indoor AI - M1 Pose/Gesture"
