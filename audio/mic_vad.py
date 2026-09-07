@@ -34,10 +34,10 @@ class MicVAD:
         self,
         sample_rate: int = 16000,
         block_size: int = 512,
-        threshold: float = 0.5,
-        min_silence_duration_ms: int = 350,
-        speech_pad_ms: int = 250,
-        pre_roll_ms: int = 250,
+        threshold: float = 0.42,
+        min_silence_duration_ms: int = 500,
+        speech_pad_ms: int = 300,
+        pre_roll_ms: int = 400,
         max_segment_s: float = 20.0,
         device=None,
     ):
@@ -221,6 +221,8 @@ class MicVAD:
         self._pre_roll.clear()
 
         duration_s = len(audio) / self.sample_rate
+        audio_rms = self._rms(audio)
+        audio_peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
 
         return [
             {
@@ -235,6 +237,8 @@ class MicVAD:
                 "audio": audio,
                 "sample_rate": self.sample_rate,
                 "duration_s": duration_s,
+                "rms": audio_rms,
+                "peak": audio_peak,
                 "forced": forced,
             },
         ]
