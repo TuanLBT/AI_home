@@ -19,6 +19,12 @@ from memory.episode_store import EpisodeStore
 
 
 NTU_HAND_WAVING_LABEL = 22  # A23 in zero-based MMAction2 labels
+LEFT_SHOULDER = 5
+RIGHT_SHOULDER = 6
+LEFT_ELBOW = 7
+RIGHT_ELBOW = 8
+LEFT_WRIST = 9
+RIGHT_WRIST = 10
 
 
 def _annotations(payload):
@@ -56,7 +62,7 @@ def _motion_score(points: np.ndarray, scores: np.ndarray) -> float:
 
     # Normalize motion by shoulder width when COCO-17 joints are available.
     if points.shape[1] >= 7:
-        shoulder_width = np.linalg.norm(points[:, 6] - points[:, 5], axis=1)
+        shoulder_width = np.linalg.norm(points[:, RIGHT_SHOULDER] - points[:, LEFT_SHOULDER], axis=1)
         scale = float(np.median(shoulder_width[shoulder_width > 1.0])) if np.any(shoulder_width > 1.0) else 1.0
     else:
         span = np.ptp(points.reshape(-1, 2), axis=0)
@@ -67,6 +73,69 @@ def _motion_score(points: np.ndarray, scores: np.ndarray) -> float:
     if not np.any(valid):
         return float("inf")
     return float(np.median(delta[valid]) / scale)
+
+
+def _raised_hand_fraction(
+    points: np.ndarray,
+    scores: np.ndarray,
+    *,
+    min_confidence: float = 0.25,
+    wrist_margin_shoulder_width: float = 0.10,
+) -> float:
+    """Fraction of valid frames where either arm is in a raised-hand pose.
+
+    COCO image coordinates grow downward, so a smaller y value is higher.
+    We reject IDLE negatives when a wrist is above its shoulder, or when the
+    elbow and wrist are both near shoulder height. This is intentionally
+    conservative: ambiguous raised-arm examples should not teach IDLE.
+    """
+    if points.ndim != 3 or points.shape[1:] != (17, 2):
+        return 1.0
+    if scores.ndim != 2 or scores.shape[1] != 17:
+        return 1.0
+
+    valid_shoulders = (
+        (scores[:, LEFT_SHOULDER] >= min_confidence)
+        & (scores[:, RIGHT_SHOULDER] >= min_confidence)
+    )
+    shoulder_width = np.linalg.norm(
+        points[:, RIGHT_SHOULDER] - points[:, LEFT_SHOULDER],
+        axis=1,
+    )
+    valid_shoulders &= shoulder_width > 1.0
+
+    if not np.any(valid_shoulders):
+        return 1.0
+
+    raised = np.zeros(len(points), dtype=bool)
+
+    for shoulder, elbow, wrist in (
+        (LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST),
+        (RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST),
+    ):
+        valid_arm = (
+            valid_shoulders
+            & (scores[:, shoulder] >= min_confidence)
+            & (scores[:, elbow] >= min_confidence)
+            & (scores[:, wrist] >= min_confidence)
+        )
+        if not np.any(valid_arm):
+            continue
+
+        margin = shoulder_width * wrist_margin_shoulder_width
+        wrist_above_shoulder = points[:, wrist, 1] < (points[:, shoulder, 1] - margin)
+        elbow_near_or_above_shoulder = points[:, elbow, 1] < (points[:, shoulder, 1] + margin)
+        wrist_near_shoulder = points[:, wrist, 1] < (points[:, shoulder, 1] + margin)
+
+        raised |= valid_arm & (
+            wrist_above_shoulder
+            | (elbow_near_or_above_shoulder & wrist_near_shoulder)
+        )
+
+    valid_frame_count = int(valid_shoulders.sum())
+    if valid_frame_count == 0:
+        return 1.0
+    return float((raised & valid_shoulders).sum() / valid_frame_count)
 
 
 def _to_samples(points: np.ndarray, scores: np.ndarray, *, target_fps: float, max_frames: int) -> list[dict]:
@@ -96,7 +165,7 @@ def _to_samples(points: np.ndarray, scores: np.ndarray, *, target_fps: float, ma
     return samples
 
 
-def _episode(annotation: dict, *, label: str, source_label: int, points: np.ndarray, scores: np.ndarray, target_fps: float, max_frames: int, motion_score: float | None) -> LearningEpisode | None:
+def _episode(annotation: dict, *, label: str, source_label: int, points: np.ndarray, scores: np.ndarray, target_fps: float, max_frames: int, motion_score: float | None, raised_hand_fraction: float | None) -> LearningEpisode | None:
     samples = _to_samples(points, scores, target_fps=target_fps, max_frames=max_frames)
     if not samples:
         return None
@@ -118,9 +187,11 @@ def _episode(annotation: dict, *, label: str, source_label: int, points: np.ndar
         verified=True,
         metadata={
             "dataset": "ntu120_2d",
+            "import_policy": "v2_raise_hand_safe_idle",
             "source_action_label_zero_based": source_label,
             "source_sample": frame_dir,
             "motion_score": motion_score,
+            "raised_hand_fraction": raised_hand_fraction,
             "target_fps": target_fps,
             "original_frames": int(len(points)),
         },
@@ -131,7 +202,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Import a balanced CALL_ATTENTION/IDLE subset from MMAction2 ntu120_2d.pkl")
     parser.add_argument("input", type=Path, nargs="?", default=Path("data/public/ntu120_2d.pkl"))
     parser.add_argument("--per-label", type=int, default=200, help="Maximum imported episodes per project label")
-    parser.add_argument("--idle-pool", type=int, default=3000, help="How many non-A23 samples to inspect for low-motion IDLE negatives")
+    parser.add_argument("--idle-pool", type=int, default=5000, help="How many non-A23 samples to inspect for safe low-motion IDLE negatives")
+    parser.add_argument("--max-idle-raised-fraction", type=float, default=0.05, help="Reject IDLE candidates with raised hands in more than this fraction of valid frames")
     parser.add_argument("--max-frames", type=int, default=64)
     parser.add_argument("--fps", type=float, default=15.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -143,6 +215,8 @@ def main() -> None:
         parser.error(f"Dataset not found: {args.input}")
     if args.per_label < 1 or args.max_frames < 5 or args.fps <= 0:
         parser.error("Invalid import limits")
+    if not 0.0 <= args.max_idle_raised_fraction <= 1.0:
+        parser.error("--max-idle-raised-fraction must be between 0 and 1")
 
     print(f"Loading {args.input} ...")
     with args.input.open("rb") as file:
@@ -152,11 +226,12 @@ def main() -> None:
 
     rng = random.Random(args.seed)
     positives: list[tuple[dict, np.ndarray, np.ndarray]] = []
-    negative_candidates: list[tuple[float, dict, int, np.ndarray, np.ndarray]] = []
+    negative_candidates: list[tuple[float, float, dict, int, np.ndarray, np.ndarray]] = []
 
     order = list(range(len(annotations)))
     rng.shuffle(order)
     scanned_idle = 0
+    rejected_raised = 0
 
     for idx in order:
         ann = annotations[idx]
@@ -184,9 +259,15 @@ def main() -> None:
         if scanned_idle >= args.idle_pool:
             continue
         scanned_idle += 1
+
+        raised_fraction = _raised_hand_fraction(points, scores)
+        if raised_fraction > args.max_idle_raised_fraction:
+            rejected_raised += 1
+            continue
+
         motion = _motion_score(points, scores)
         if np.isfinite(motion):
-            negative_candidates.append((motion, ann, source_label, points, scores))
+            negative_candidates.append((motion, raised_fraction, ann, source_label, points, scores))
 
         if len(positives) >= args.per_label and scanned_idle >= args.idle_pool:
             break
@@ -195,9 +276,11 @@ def main() -> None:
     negatives = negative_candidates[: args.per_label]
 
     print(f"CALL_ATTENTION candidates: {len(positives)}")
-    print(f"IDLE low-motion candidates: {len(negatives)} / scanned {scanned_idle}")
+    print(f"IDLE safe low-motion candidates: {len(negatives)} / scanned {scanned_idle}")
+    print(f"Rejected raised-arm IDLE candidates: {rejected_raised}")
     if negatives:
         print(f"IDLE motion range: {negatives[0][0]:.5f} .. {negatives[-1][0]:.5f}")
+        print(f"IDLE raised-hand fraction max: {max(item[1] for item in negatives):.3f}")
 
     if args.dry_run:
         print("Dry run: nothing written.")
@@ -216,12 +299,13 @@ def main() -> None:
             target_fps=args.fps,
             max_frames=args.max_frames,
             motion_score=_motion_score(points, scores),
+            raised_hand_fraction=_raised_hand_fraction(points, scores),
         )
         if episode is not None:
             store.append(episode)
             counts["CALL_ATTENTION"] += 1
 
-    for motion, ann, source_label, points, scores in negatives:
+    for motion, raised_fraction, ann, source_label, points, scores in negatives:
         episode = _episode(
             ann,
             label="IDLE",
@@ -231,6 +315,7 @@ def main() -> None:
             target_fps=args.fps,
             max_frames=args.max_frames,
             motion_score=motion,
+            raised_hand_fraction=raised_fraction,
         )
         if episode is not None:
             store.append(episode)
