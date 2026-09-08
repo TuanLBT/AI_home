@@ -38,10 +38,16 @@ class EventEngine:
         entered_approach_window_s: float = 3.0,
         sat_stay_s: float = 3.0,
         gesture_rearm_s: float = 1.0,
+        ignored_low_level_gestures: tuple[str, ...] = (
+            "LEFT_HAND_RAISED",
+            "RIGHT_HAND_RAISED",
+            "BOTH_HANDS_RAISED",
+        ),
     ):
         self.entered_approach_window_s = entered_approach_window_s
         self.sat_stay_s = sat_stay_s
         self.gesture_rearm_s = gesture_rearm_s
+        self.ignored_low_level_gestures = set(ignored_low_level_gestures)
 
         self.people: dict[str, PersonEventMemory] = {}
 
@@ -99,6 +105,9 @@ class EventEngine:
                 person = world.people.get(entity_id)
                 gesture = event["gesture"]
 
+                if gesture in self.ignored_low_level_gestures:
+                    continue
+
                 if person is not None and person.present:
                     end_candidate_at = memory.gesture_end_candidate_at.get(
                         gesture
@@ -153,6 +162,9 @@ class EventEngine:
 
             elif event_type == "GESTURE_ENDED":
                 gesture = event["gesture"]
+
+                if gesture in self.ignored_low_level_gestures:
+                    continue
 
                 if memory.gesture_session_active.get(
                     gesture,
