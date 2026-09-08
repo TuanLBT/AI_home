@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 import time
+
+os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 import cv2
 
