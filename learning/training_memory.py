@@ -32,9 +32,16 @@ class TrainingMemory:
         self,
         *,
         include_verified_raw: bool = True,
-        include_legacy: bool = True,
+        include_legacy: bool = False,
         include_auto_trusted: bool = True,
     ) -> Iterable[LearningEpisode]:
+        """Yield episodes eligible for learning.
+
+        Legacy ``data/teaching_examples.jsonl`` data is intentionally disabled
+        by default. It predates the generic episode/provenance pipeline and can
+        contain low-quality or duplicate captures. Pass ``include_legacy=True``
+        only for explicit audits or backwards-compatibility experiments.
+        """
         reviews = self.review_store.latest_by_episode()
         proposals = self.proposal_store.latest_by_episode()
         excluded_ids = self.quality_store.excluded_ids()
