@@ -8,25 +8,34 @@ from learning.pose_features import pose_frame_vector
 
 
 class PoseConceptObserver:
-    """Runs learned pose concepts in shadow mode without emitting actions."""
+    """Run learned pose concepts live and confirm temporal concept events."""
 
     def __init__(
         self,
         learner: PoseConceptLearner,
         *,
         window_s: float = 0.65,
-        prediction_interval_s: float = 0.5,
+        prediction_interval_s: float = 0.33,
         min_frames: int = 5,
+        confirmation_windows: int = 3,
+        min_confirmation_confidence: float = 0.50,
+        event_cooldown_s: float = 2.0,
+        ignored_event_labels: tuple[str, ...] = ("IDLE",),
     ):
         self.learner = learner
         self.window_s = window_s
         self.prediction_interval_s = prediction_interval_s
         self.min_frames = min_frames
-        self._history: dict[
-            str,
-            deque[tuple[float, Any]],
-        ] = {}
+        self.confirmation_windows = max(1, int(confirmation_windows))
+        self.min_confirmation_confidence = float(min_confirmation_confidence)
+        self.event_cooldown_s = float(event_cooldown_s)
+        self.ignored_event_labels = set(ignored_event_labels)
+
+        self._history: dict[str, deque[tuple[float, Any]]] = {}
         self._last_prediction_at: dict[str, float] = {}
+        self._streak_label: dict[str, str] = {}
+        self._streak_count: dict[str, int] = {}
+        self._last_event_at: dict[tuple[str, str], float] = {}
 
     def update(
         self,
@@ -34,10 +43,14 @@ class PoseConceptObserver:
         now: float,
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
 
         for observation in observations:
             if observation.type != "person_pose":
                 continue
+
+            entity_id = observation.entity_id
+            seen_ids.add(entity_id)
 
             vector = pose_frame_vector(
                 observation.data.get("keypoints", []),
@@ -50,7 +63,6 @@ class PoseConceptObserver:
             if vector is None:
                 continue
 
-            entity_id = observation.entity_id
             history = self._history.setdefault(
                 entity_id,
                 deque(),
@@ -85,11 +97,60 @@ class PoseConceptObserver:
                 continue
 
             self._last_prediction_at[entity_id] = now
+            label = str(prediction["label"])
+            confidence = float(prediction["confidence"])
+
+            if self._streak_label.get(entity_id) == label:
+                streak = self._streak_count.get(entity_id, 0) + 1
+            else:
+                streak = 1
+
+            self._streak_label[entity_id] = label
+            self._streak_count[entity_id] = streak
+
             events.append({
                 "type": "LEARNED_CONCEPT_SHADOW",
                 "entity_id": entity_id,
                 "timestamp": now,
+                "streak": streak,
                 **prediction,
             })
+
+            if label in self.ignored_event_labels:
+                continue
+
+            if confidence < self.min_confirmation_confidence:
+                continue
+
+            if streak < self.confirmation_windows:
+                continue
+
+            event_key = (entity_id, label)
+            last_event = self._last_event_at.get(event_key)
+
+            if (
+                last_event is not None
+                and now - last_event < self.event_cooldown_s
+            ):
+                continue
+
+            self._last_event_at[event_key] = now
+            events.append({
+                "type": "LEARNED_CONCEPT_CONFIRMED",
+                "entity_id": entity_id,
+                "timestamp": now,
+                "label": label,
+                "confidence": confidence,
+                "streak": streak,
+                "distances": prediction.get("distances", {}),
+            })
+
+        # Drop stale per-person streak/history when a tracked person disappears.
+        stale_ids = set(self._history) - seen_ids
+        for entity_id in stale_ids:
+            self._history.pop(entity_id, None)
+            self._last_prediction_at.pop(entity_id, None)
+            self._streak_label.pop(entity_id, None)
+            self._streak_count.pop(entity_id, None)
 
         return events
