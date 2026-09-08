@@ -18,8 +18,8 @@ class PoseConceptObserver:
         prediction_interval_s: float = 0.33,
         min_frames: int = 5,
         confirmation_windows: int = 3,
+        release_windows: int = 2,
         min_confirmation_confidence: float = 0.50,
-        event_cooldown_s: float = 2.0,
         ignored_event_labels: tuple[str, ...] = ("IDLE",),
     ):
         self.learner = learner
@@ -27,15 +27,20 @@ class PoseConceptObserver:
         self.prediction_interval_s = prediction_interval_s
         self.min_frames = min_frames
         self.confirmation_windows = max(1, int(confirmation_windows))
+        self.release_windows = max(1, int(release_windows))
         self.min_confirmation_confidence = float(min_confirmation_confidence)
-        self.event_cooldown_s = float(event_cooldown_s)
         self.ignored_event_labels = set(ignored_event_labels)
 
         self._history: dict[str, deque[tuple[float, Any]]] = {}
         self._last_prediction_at: dict[str, float] = {}
         self._streak_label: dict[str, str] = {}
         self._streak_count: dict[str, int] = {}
-        self._last_event_at: dict[tuple[str, str], float] = {}
+
+        # A confirmed label stays latched until the observer sees a stable
+        # ignored/background label (normally IDLE). This makes events
+        # edge-triggered: one event per gesture bout, not one every cooldown.
+        self._active_confirmed_label: dict[str, str] = {}
+        self._release_count: dict[str, int] = {}
 
     def update(
         self,
@@ -113,11 +118,21 @@ class PoseConceptObserver:
                 "entity_id": entity_id,
                 "timestamp": now,
                 "streak": streak,
+                "active_confirmed_label": self._active_confirmed_label.get(
+                    entity_id
+                ),
                 **prediction,
             })
 
             if label in self.ignored_event_labels:
+                release_count = self._release_count.get(entity_id, 0) + 1
+                self._release_count[entity_id] = release_count
+
+                if release_count >= self.release_windows:
+                    self._active_confirmed_label.pop(entity_id, None)
                 continue
+
+            self._release_count[entity_id] = 0
 
             if confidence < self.min_confirmation_confidence:
                 continue
@@ -125,16 +140,10 @@ class PoseConceptObserver:
             if streak < self.confirmation_windows:
                 continue
 
-            event_key = (entity_id, label)
-            last_event = self._last_event_at.get(event_key)
-
-            if (
-                last_event is not None
-                and now - last_event < self.event_cooldown_s
-            ):
+            if self._active_confirmed_label.get(entity_id) == label:
                 continue
 
-            self._last_event_at[event_key] = now
+            self._active_confirmed_label[entity_id] = label
             events.append({
                 "type": "LEARNED_CONCEPT_CONFIRMED",
                 "entity_id": entity_id,
@@ -145,12 +154,14 @@ class PoseConceptObserver:
                 "distances": prediction.get("distances", {}),
             })
 
-        # Drop stale per-person streak/history when a tracked person disappears.
+        # Drop stale per-person state when a tracked person disappears.
         stale_ids = set(self._history) - seen_ids
         for entity_id in stale_ids:
             self._history.pop(entity_id, None)
             self._last_prediction_at.pop(entity_id, None)
             self._streak_label.pop(entity_id, None)
             self._streak_count.pop(entity_id, None)
+            self._active_confirmed_label.pop(entity_id, None)
+            self._release_count.pop(entity_id, None)
 
         return events
