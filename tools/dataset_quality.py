@@ -65,12 +65,22 @@ def main() -> None:
     parser.add_argument("--summary", action="store_true")
     parser.add_argument("--exclude", metavar="EPISODE_ID")
     parser.add_argument("--restore", metavar="EPISODE_ID")
+    parser.add_argument(
+        "--exclude-all-current",
+        action="store_true",
+        help="Quarantine every episode currently in data/episodes.jsonl. Later imports are unaffected.",
+    )
     parser.add_argument("--reason", default="low_quality")
     parser.add_argument("--note")
     args = parser.parse_args()
 
-    if args.exclude and args.restore:
-        parser.error("Choose only one of --exclude or --restore")
+    chosen = sum(bool(value) for value in (
+        args.exclude,
+        args.restore,
+        args.exclude_all_current,
+    ))
+    if chosen > 1:
+        parser.error("Choose only one exclusion/restore operation")
 
     store = EpisodeQualityStore()
 
@@ -96,7 +106,18 @@ def main() -> None:
         )
         print(f"Restored to training eligibility: {args.restore}")
 
-    if args.summary or (not args.exclude and not args.restore):
+    if args.exclude_all_current:
+        episodes = list(EpisodeStore().iter_episodes())
+        for episode in episodes:
+            store.record(
+                episode_id=episode.episode_id,
+                excluded=True,
+                reason=args.reason or "dataset_reset",
+                note=args.note,
+            )
+        print(f"Excluded {len(episodes)} current episode(s) from training.")
+
+    if args.summary or chosen == 0:
         print_summary()
 
 
