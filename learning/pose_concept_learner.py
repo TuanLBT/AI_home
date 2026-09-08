@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections import Counter
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
+from learning.episode import LearningEpisode, legacy_pose_record_to_episode
 from learning.pose_features import (
     aggregate_pose_window,
     episode_window_vectors,
@@ -60,10 +61,59 @@ class PoseConceptLearner:
         if not path.is_file():
             raise FileNotFoundError(path)
 
+        return cls._from_records(cls._iter_episode_records(path))
+
+    @classmethod
+    def from_jsonl_sources(
+        cls,
+        paths: Iterable[str | Path],
+    ) -> "PoseConceptLearner":
+        existing_paths = [Path(path) for path in paths if Path(path).is_file()]
+        if not existing_paths:
+            raise FileNotFoundError("No teaching or episode JSONL source found")
+
+        def records():
+            for path in existing_paths:
+                yield from cls._iter_episode_records(path)
+
+        return cls._from_records(records())
+
+    @classmethod
+    def _from_records(
+        cls,
+        episodes: Iterable[LearningEpisode],
+    ) -> "PoseConceptLearner":
         vectors: list[np.ndarray] = []
         labels: list[str] = []
         example_counts: Counter[str] = Counter()
 
+        for episode in episodes:
+            label = str(episode.proposed_meaning or "").strip()
+            if not label:
+                continue
+
+            pose = episode.observations.get("pose") or {}
+            samples = pose.get("samples") or []
+            episode_vectors = episode_window_vectors(samples)
+
+            if not episode_vectors:
+                continue
+
+            vectors.extend(episode_vectors)
+            labels.extend([label] * len(episode_vectors))
+            example_counts[label] += 1
+
+        if not vectors:
+            raise ValueError("No usable pose teaching examples")
+
+        return cls(
+            np.stack(vectors),
+            labels,
+            dict(example_counts),
+        )
+
+    @staticmethod
+    def _iter_episode_records(path: Path):
         with path.open("r", encoding="utf-8") as file:
             for line_number, line in enumerate(file, start=1):
                 line = line.strip()
@@ -78,33 +128,18 @@ class PoseConceptLearner:
                         f"Invalid JSON at {path}:{line_number}"
                     ) from exc
 
-                if record.get("modality") != "pose":
+                if "observations" in record and "source" in record:
+                    try:
+                        yield LearningEpisode.from_dict(record)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Invalid episode at {path}:{line_number}"
+                        ) from exc
                     continue
 
-                label = str(record.get("label") or "").strip()
-
-                if not label:
-                    continue
-
-                episode_vectors = episode_window_vectors(
-                    record.get("samples") or []
-                )
-
-                if not episode_vectors:
-                    continue
-
-                vectors.extend(episode_vectors)
-                labels.extend([label] * len(episode_vectors))
-                example_counts[label] += 1
-
-        if not vectors:
-            raise ValueError("No usable pose teaching examples")
-
-        return cls(
-            np.stack(vectors),
-            labels,
-            dict(example_counts),
-        )
+                episode = legacy_pose_record_to_episode(record)
+                if episode is not None:
+                    yield episode
 
     def predict(
         self,
