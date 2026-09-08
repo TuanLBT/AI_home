@@ -731,6 +731,8 @@ def main():
                     now=now,
                 )
 
+                learned_high_level_events: list[dict] = []
+
                 if learned_pose_observer is not None:
                     learned_events = learned_pose_observer.update(
                         latest_observations,
@@ -745,14 +747,37 @@ def main():
                                 distances.items()
                             )
                         )
-                        print(
-                            f'>>> LEARNED SHADOW '
-                            f'{learned_event["entity_id"]}: '
-                            f'{learned_event["label"]} '
-                            f'(confidence='
-                            f'{learned_event["confidence"]:.2f}; '
-                            f'{distance_text})'
-                        )
+
+                        if learned_event["type"] == "LEARNED_CONCEPT_CONFIRMED":
+                            print(
+                                f'>>> LEARNED EVENT '
+                                f'{learned_event["entity_id"]}: '
+                                f'{learned_event["label"]} '
+                                f'(confidence={learned_event["confidence"]:.2f}; '
+                                f'streak={learned_event.get("streak", 0)}; '
+                                f'{distance_text})'
+                            )
+
+                            person = world.people.get(learned_event["entity_id"])
+                            if person is not None and person.present:
+                                learned_high_level_events.append({
+                                    "type": "GESTURE_WHILE_PRESENT",
+                                    "entity_id": learned_event["entity_id"],
+                                    "gesture": learned_event["label"],
+                                    "timestamp": now,
+                                    "source": "learned_pose",
+                                    "confidence": learned_event["confidence"],
+                                })
+                        else:
+                            print(
+                                f'>>> LEARNED SHADOW '
+                                f'{learned_event["entity_id"]}: '
+                                f'{learned_event["label"]} '
+                                f'(confidence='
+                                f'{learned_event["confidence"]:.2f}; '
+                                f'streak={learned_event.get("streak", 0)}; '
+                                f'{distance_text})'
+                            )
 
                 apply_held_object_grounding(
                     world,
@@ -773,6 +798,7 @@ def main():
                     world,
                     now,
                 )
+                high_level_events.extend(learned_high_level_events)
 
                 for event in high_level_events:
                     print_high_level_event(event)
