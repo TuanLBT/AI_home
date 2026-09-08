@@ -17,6 +17,11 @@ from learning.pose_features import (
 class PoseConceptLearner:
     """Small data-driven k-nearest concept learner for pose episodes."""
 
+    DEFAULT_SOURCES = (
+        Path("data/episodes.jsonl"),
+        Path("data/teaching_examples.jsonl"),
+    )
+
     def __init__(
         self,
         vectors: np.ndarray,
@@ -54,8 +59,18 @@ class PoseConceptLearner:
     @classmethod
     def from_jsonl(
         cls,
-        path: str | Path = "data/teaching_examples.jsonl",
+        path: str | Path | None = None,
     ) -> "PoseConceptLearner":
+        """Load pose learning data.
+
+        With no explicit path, merge the generic episode store with the old
+        teaching-example store. This keeps old samples alive while all new
+        Teach Mode captures go to ``data/episodes.jsonl``.
+        """
+
+        if path is None:
+            return cls.from_jsonl_sources(cls.DEFAULT_SOURCES)
+
         path = Path(path)
 
         if not path.is_file():
