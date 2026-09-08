@@ -32,17 +32,18 @@ class AutoTrustDecision:
 class AutoTrustPolicy:
     """Conservative gate for using model-proposed labels without review.
 
-    Auto labels are only trusted when the concept already has enough human
-    anchors, the prediction is very confident, and the best distance is
-    meaningfully separated from the runner-up. A per-label quota prevents
-    self-labeled data from overwhelming human examples.
+    The learner's current confidence score is intentionally soft and tends to
+    stay near 0.5-0.6 when only a few labels exist, so confidence is only a
+    coarse floor. Separation between the best and runner-up distances is the
+    stronger signal. Static images are excluded from auto-trust for now because
+    the current learner is trained primarily on temporal pose episodes.
     """
 
     def __init__(
         self,
         *,
         min_human_examples: int = 5,
-        min_confidence: float = 0.90,
+        min_confidence: float = 0.55,
         max_best_to_second_ratio: float = 0.72,
         max_auto_per_human_ratio: float = 0.25,
     ):
@@ -68,6 +69,7 @@ class AutoTrustPolicy:
         *,
         human_examples: int,
         existing_auto_examples: int = 0,
+        source: str | None = None,
     ) -> AutoTrustDecision:
         label = str(
             proposal.get("candidate_label")
@@ -83,15 +85,15 @@ class AutoTrustPolicy:
                 human_examples, max_auto_examples,
             )
 
-        if human_examples < self.min_human_examples:
+        if source == "image":
             return AutoTrustDecision(
-                False, "not_enough_human_anchors", label, confidence, None,
+                False, "static_image_not_auto_trusted", label, confidence, None,
                 human_examples, max_auto_examples,
             )
 
-        if confidence < self.min_confidence:
+        if human_examples < self.min_human_examples:
             return AutoTrustDecision(
-                False, "confidence_too_low", label, confidence, None,
+                False, "not_enough_human_anchors", label, confidence, None,
                 human_examples, max_auto_examples,
             )
 
@@ -110,6 +112,12 @@ class AutoTrustPolicy:
         if margin_ratio > self.max_best_to_second_ratio:
             return AutoTrustDecision(
                 False, "prediction_not_separated", label, confidence, margin_ratio,
+                human_examples, max_auto_examples,
+            )
+
+        if confidence < self.min_confidence:
+            return AutoTrustDecision(
+                False, "confidence_too_low", label, confidence, margin_ratio,
                 human_examples, max_auto_examples,
             )
 
