@@ -18,6 +18,27 @@ from memory.episode_reviews import EpisodeReviewStore
 from memory.episode_store import EpisodeStore
 
 
+def _source_name(episode) -> str | None:
+    metadata = episode.metadata or {}
+    for key in ("source_path", "path", "filename", "source_sample"):
+        value = metadata.get(key)
+        if value:
+            return Path(str(value)).name
+    return None
+
+
+def _print_timeline(proposal: dict) -> None:
+    windows = proposal.get("windows") or []
+    if not windows:
+        return
+    print("  timeline:")
+    for item in windows:
+        print(
+            f"    {float(item.get('start_s', 0.0)):5.2f}-{float(item.get('end_s', 0.0)):5.2f}s "
+            f"{item.get('label')} {float(item.get('confidence', 0.0)):.2f}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Propose meanings for unlabeled/unreviewed learning episodes."
@@ -27,6 +48,7 @@ def main() -> None:
     parser.add_argument("--min-human", type=int, default=5)
     parser.add_argument("--max-auto-ratio", type=float, default=0.25)
     parser.add_argument("--all", action="store_true", help="Re-propose even if a proposal already exists.")
+    parser.add_argument("--timeline", action="store_true", help="Print per-window predictions for temporal episodes.")
     args = parser.parse_args()
 
     training_memory = TrainingMemory()
@@ -92,12 +114,16 @@ def main() -> None:
         candidate = proposal.get("candidate_label") or proposal.get("label")
         margin = trust.margin_ratio
         margin_text = "n/a" if margin is None else f"{margin:.2f}"
+        source_name = _source_name(episode)
+        name_text = f" file={source_name}" if source_name else ""
         print(
-            f"{episode.episode_id} source={episode.source} "
+            f"{episode.episode_id} source={episode.source}{name_text} "
             f"candidate={candidate} confidence={proposal.get('confidence', 0.0):.2f} "
             f"margin={margin_text} accepted={proposal.get('accepted', False)} "
             f"auto_trusted={trust.trusted} reason={trust.reason}"
         )
+        if args.timeline and episode.source != "image":
+            _print_timeline(proposal)
 
     print(f"Done. Wrote {count} proposal(s).")
 
