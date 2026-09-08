@@ -14,7 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from camera.pose_tracker import PersonPoseTracker
 from config import Config
-from teaching.example_store import TeachingExampleStore
+from learning.episode import LearningEpisode
+from memory.episode_store import EpisodeStore
 
 
 def select_primary_person(observations):
@@ -72,14 +73,16 @@ def capture_pose_episode(
     *,
     label: str,
     duration_s: float,
-) -> list[dict]:
-    started_at = time.monotonic()
+) -> tuple[list[dict], str | None, float]:
+    started_monotonic = time.monotonic()
+    started_wall = time.time()
     samples: list[dict] = []
+    primary_entity_id: str | None = None
 
     while True:
         now = time.monotonic()
 
-        if now - started_at >= duration_s:
+        if now - started_monotonic >= duration_s:
             break
 
         ok, frame = cap.read()
@@ -92,8 +95,11 @@ def capture_pose_episode(
         )
 
         if observation is not None:
+            if primary_entity_id is None:
+                primary_entity_id = observation.entity_id
+
             samples.append({
-                "relative_time_s": now - started_at,
+                "relative_time_s": now - started_monotonic,
                 "entity_id": observation.entity_id,
                 "confidence": observation.confidence,
                 "bbox": observation.data.get("bbox", []),
@@ -106,7 +112,7 @@ def capture_pose_episode(
 
         draw_status(
             frame,
-            f"RECORDING: {label} ({now - started_at:.1f}s)",
+            f"RECORDING: {label} ({now - started_monotonic:.1f}s)",
             (0, 0, 255),
         )
         cv2.imshow("Indoor AI Teach Mode", frame)
@@ -114,12 +120,12 @@ def capture_pose_episode(
         if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
             break
 
-    return samples
+    return samples, primary_entity_id, started_wall
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Record labeled observation episodes for Indoor AI."
+        description="Record labeled learning episodes for Indoor AI."
     )
     parser.add_argument(
         "--modality",
@@ -138,7 +144,8 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("data/teaching_examples.jsonl"),
+        default=Path("data/episodes.jsonl"),
+        help="Generic episode JSONL output.",
     )
     args = parser.parse_args()
 
@@ -162,7 +169,7 @@ def main() -> None:
         imgsz=cfg.imgsz,
         device=cfg.device,
     )
-    store = TeachingExampleStore(args.output)
+    store = EpisodeStore(args.output)
 
     print(
         f"Teach Mode: label={args.label!r}, "
@@ -179,7 +186,7 @@ def main() -> None:
             if not countdown(cap, args.countdown, args.label):
                 break
 
-            samples = capture_pose_episode(
+            samples, entity_id, started_at = capture_pose_episode(
                 cap,
                 tracker,
                 label=args.label,
@@ -190,28 +197,46 @@ def main() -> None:
                 print("No person pose captured; take was not saved.")
                 continue
 
-            record = store.record(
-                label=args.label,
-                modality=args.modality,
-                samples=samples,
-                duration_s=args.seconds,
+            actual_duration_s = float(samples[-1]["relative_time_s"])
+            episode = LearningEpisode(
+                source="camera",
+                started_at=started_at,
+                ended_at=started_at + actual_duration_s,
+                entity_id=entity_id,
+                observations={
+                    "pose": {
+                        "samples": samples,
+                        "sample_count": len(samples),
+                    }
+                },
+                context={
+                    "capture_mode": "teach",
+                    "modality": args.modality,
+                },
+                proposed_meaning=args.label,
+                confidence=1.0,
+                label_origin="human",
+                verified=True,
                 metadata={
                     "take": take,
+                    "requested_duration_s": args.seconds,
+                    "actual_duration_s": actual_duration_s,
                     "model": cfg.model_name,
                     "imgsz": cfg.imgsz,
                     "keypoint_confidence": cfg.keypoint_confidence,
                 },
             )
+            episode_id = store.append(episode)
             saved += 1
             print(
-                f"Saved {record['example_id']} "
-                f"with {record['sample_count']} samples."
+                f"Saved episode {episode_id} "
+                f"with {len(samples)} pose samples."
             )
     finally:
         cap.release()
         cv2.destroyAllWindows()
 
-    print(f"Done. Saved {saved} teaching example(s) to {args.output}.")
+    print(f"Done. Saved {saved} learning episode(s) to {args.output}.")
 
 
 if __name__ == "__main__":
