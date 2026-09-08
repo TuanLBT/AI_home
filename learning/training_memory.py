@@ -6,23 +6,26 @@ from typing import Iterable
 
 from learning.episode import LearningEpisode, legacy_pose_record_to_episode
 from memory.episode_proposals import EpisodeProposalStore
+from memory.episode_quality import EpisodeQualityStore
 from memory.episode_reviews import EpisodeReviewStore
 from memory.episode_store import EpisodeStore
 
 
 class TrainingMemory:
-    """Resolve raw episodes plus reviews/proposals into trainable episodes."""
+    """Resolve raw episodes plus reviews/proposals/quality into training data."""
 
     def __init__(
         self,
         episode_path: str | Path = "data/episodes.jsonl",
         review_path: str | Path = "data/episode_reviews.jsonl",
         proposal_path: str | Path = "data/episode_proposals.jsonl",
+        quality_path: str | Path = "data/episode_quality.jsonl",
         legacy_path: str | Path = "data/teaching_examples.jsonl",
     ):
         self.episode_store = EpisodeStore(episode_path)
         self.review_store = EpisodeReviewStore(review_path)
         self.proposal_store = EpisodeProposalStore(proposal_path)
+        self.quality_store = EpisodeQualityStore(quality_path)
         self.legacy_path = Path(legacy_path)
 
     def iter_trainable(
@@ -34,9 +37,13 @@ class TrainingMemory:
     ) -> Iterable[LearningEpisode]:
         reviews = self.review_store.latest_by_episode()
         proposals = self.proposal_store.latest_by_episode()
+        excluded_ids = self.quality_store.excluded_ids()
 
         if self.episode_store.path.is_file():
             for episode in self.episode_store.iter_episodes():
+                if episode.episode_id in excluded_ids:
+                    continue
+
                 review = reviews.get(episode.episode_id)
 
                 if review is not None:
