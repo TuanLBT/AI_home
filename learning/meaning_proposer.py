@@ -27,6 +27,7 @@ class MeaningProposer:
                 "confidence": 0.0,
                 "accepted": False,
                 "reason": "no_usable_pose",
+                "windows": [],
             }
 
         confidence = float(prediction["confidence"])
@@ -40,6 +41,7 @@ class MeaningProposer:
             "accepted": accepted,
             "reason": "learner_prediction",
             "distances": prediction.get("distances", {}),
+            "windows": prediction.get("windows", []),
         }
 
     def apply(self, episode: LearningEpisode) -> LearningEpisode:
