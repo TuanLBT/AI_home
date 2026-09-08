@@ -5,21 +5,24 @@ from pathlib import Path
 from typing import Iterable
 
 from learning.episode import LearningEpisode, legacy_pose_record_to_episode
+from memory.episode_proposals import EpisodeProposalStore
 from memory.episode_reviews import EpisodeReviewStore
 from memory.episode_store import EpisodeStore
 
 
 class TrainingMemory:
-    """Resolve raw episodes plus human reviews into trainable episodes."""
+    """Resolve raw episodes plus reviews/proposals into trainable episodes."""
 
     def __init__(
         self,
         episode_path: str | Path = "data/episodes.jsonl",
         review_path: str | Path = "data/episode_reviews.jsonl",
+        proposal_path: str | Path = "data/episode_proposals.jsonl",
         legacy_path: str | Path = "data/teaching_examples.jsonl",
     ):
         self.episode_store = EpisodeStore(episode_path)
         self.review_store = EpisodeReviewStore(review_path)
+        self.proposal_store = EpisodeProposalStore(proposal_path)
         self.legacy_path = Path(legacy_path)
 
     def iter_trainable(
@@ -27,8 +30,10 @@ class TrainingMemory:
         *,
         include_verified_raw: bool = True,
         include_legacy: bool = True,
+        include_auto_trusted: bool = True,
     ) -> Iterable[LearningEpisode]:
         reviews = self.review_store.latest_by_episode()
+        proposals = self.proposal_store.latest_by_episode()
 
         if self.episode_store.path.is_file():
             for episode in self.episode_store.iter_episodes():
@@ -56,6 +61,23 @@ class TrainingMemory:
                     and (episode.proposed_meaning or "").strip()
                 ):
                     yield episode
+                    continue
+
+                if include_auto_trusted:
+                    proposal_record = proposals.get(episode.episode_id) or {}
+                    proposal = proposal_record.get("proposal") or {}
+                    trust = proposal.get("auto_trust") or {}
+
+                    if trust.get("trusted"):
+                        label = str(trust.get("label") or "").strip()
+                        if label:
+                            yield replace(
+                                episode,
+                                proposed_meaning=label,
+                                confidence=float(proposal.get("confidence") or 0.0),
+                                label_origin="self",
+                                verified=False,
+                            )
 
         if include_legacy and self.legacy_path.is_file():
             import json
