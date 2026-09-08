@@ -25,6 +25,11 @@ def main() -> None:
         description="List and review Indoor AI learning episodes."
     )
     parser.add_argument("--list", action="store_true", dest="list_pending")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Also show policy-trusted auto-labeled episodes.",
+    )
     parser.add_argument("--episode-id")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--accept", action="store_true")
@@ -40,20 +45,33 @@ def main() -> None:
 
     if args.list_pending or not args.episode_id:
         shown = 0
+        auto_hidden = 0
+
         for episode in EpisodeStore().iter_episodes():
             if episode.episode_id in reviews:
                 continue
+
             proposal_record = proposals.get(episode.episode_id, {})
             proposal = proposal_record.get("proposal", {})
+            trust = proposal.get("auto_trust") or {}
+
+            if trust.get("trusted") and not args.all:
+                auto_hidden += 1
+                continue
+
             candidate = proposal.get("candidate_label") or proposal.get("label")
             confidence = float(proposal.get("confidence", 0.0) or 0.0)
             print(
                 f"{episode.episode_id} source={episode.source} "
                 f"current={episode.proposed_meaning} "
-                f"candidate={candidate} confidence={confidence:.2f}"
+                f"candidate={candidate} confidence={confidence:.2f} "
+                f"auto_trusted={bool(trust.get('trusted'))}"
             )
             shown += 1
-        print(f"Pending: {shown}")
+
+        print(f"Needs review: {shown}")
+        if auto_hidden:
+            print(f"Auto-trusted hidden: {auto_hidden} (use --all to inspect)")
         if not args.episode_id:
             return
 
