@@ -23,7 +23,7 @@ def main() -> None:
         description="Propose meanings for unlabeled/unreviewed learning episodes."
     )
     parser.add_argument("--threshold", type=float, default=0.65)
-    parser.add_argument("--auto-confidence", type=float, default=0.90)
+    parser.add_argument("--auto-confidence", type=float, default=0.55)
     parser.add_argument("--min-human", type=int, default=5)
     parser.add_argument("--max-auto-ratio", type=float, default=0.25)
     parser.add_argument("--all", action="store_true", help="Re-propose even if a proposal already exists.")
@@ -79,6 +79,7 @@ def main() -> None:
             proposal,
             human_examples=human_counts.get(label, 0),
             existing_auto_examples=auto_counts.get(label, 0),
+            source=episode.source,
         )
         proposal["auto_trust"] = trust.to_dict()
 
@@ -89,10 +90,12 @@ def main() -> None:
         count += 1
 
         candidate = proposal.get("candidate_label") or proposal.get("label")
+        margin = trust.margin_ratio
+        margin_text = "n/a" if margin is None else f"{margin:.2f}"
         print(
             f"{episode.episode_id} source={episode.source} "
             f"candidate={candidate} confidence={proposal.get('confidence', 0.0):.2f} "
-            f"accepted={proposal.get('accepted', False)} "
+            f"margin={margin_text} accepted={proposal.get('accepted', False)} "
             f"auto_trusted={trust.trusted} reason={trust.reason}"
         )
 
