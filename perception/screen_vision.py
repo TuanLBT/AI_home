@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import urllib.error
 import urllib.request
@@ -29,6 +30,7 @@ class ScreenVisionPerception:
         model: str | None = None,
         timeout_s: float = 90.0,
         max_width: int = 2560,
+        max_pixels: int = 2_300_000,
         jpeg_quality: int = 82,
         extended_aspect_threshold: float = 2.2,
     ):
@@ -40,6 +42,7 @@ class ScreenVisionPerception:
         )
         self.timeout_s = float(timeout_s)
         self.max_width = max(640, int(max_width))
+        self.max_pixels = max(640 * 480, int(max_pixels))
         self.jpeg_quality = max(40, min(95, int(jpeg_quality)))
         self.extended_aspect_threshold = max(
             1.5,
@@ -51,6 +54,7 @@ class ScreenVisionPerception:
             "backend": "ollama_vlm",
             "model": self.model,
             "max_width": self.max_width,
+            "max_pixels": self.max_pixels,
             "representation": "per_monitor_grounded_prose_v1",
             "multi_monitor": True,
         }
@@ -161,10 +165,18 @@ class ScreenVisionPerception:
         rgb = frame
         height, width = rgb.shape[:2]
 
-        if width > self.max_width:
-            scale = self.max_width / float(width)
+        # A split 4096x2880 monitor resized only by width becomes 2560x1800,
+        # which is roughly twice the pixel load of the previously successful
+        # 2560x900 panorama. Cap both width and total pixel count so vision-token
+        # usage stays near the known-good range while preserving aspect ratio.
+        scale = min(1.0, self.max_width / float(width))
+        scaled_pixels = (width * scale) * (height * scale)
+        if scaled_pixels > self.max_pixels:
+            scale *= math.sqrt(self.max_pixels / float(scaled_pixels))
+
+        if scale < 0.999:
             target = (
-                self.max_width,
+                max(1, int(round(width * scale))),
                 max(1, int(round(height * scale))),
             )
             rgb = cv2.resize(rgb, target, interpolation=cv2.INTER_AREA)
