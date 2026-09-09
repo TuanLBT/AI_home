@@ -11,21 +11,27 @@ class ChatSource:
     """Queue-backed text source for desktop chat/UI integration.
 
     Text is normalized into SourcePacket and published onto the shared text
-    input bus. The current desktop runtime lazily attaches a terminal transport,
-    but the agent-facing contract stays the same for future GUI/web/socket
-    transports.
+    input bus. Desktop transport is attached lazily so the agent core does not
+    depend on terminal, GUI, web, or socket details.
     """
 
     def __init__(
         self,
         *,
         source_name: str = "chat",
-        enable_terminal: bool = True,
+        enable_terminal: bool = False,
+        enable_ipc: bool = True,
+        ipc_host: str = "127.0.0.1",
+        ipc_port: int = 8765,
     ):
         self.source_name = source_name
         self.enable_terminal = bool(enable_terminal)
+        self.enable_ipc = bool(enable_ipc)
+        self.ipc_host = ipc_host
+        self.ipc_port = int(ipc_port)
         self._queue: deque[SourcePacket] = deque()
         self._terminal = None
+        self._ipc = None
 
     def submit(
         self,
@@ -53,7 +59,7 @@ class ChatSource:
         publish_text(packet)
 
     def update(self) -> list[SourcePacket]:
-        self._ensure_terminal()
+        self._ensure_transports()
 
         packets = list(self._queue)
         self._queue.clear()
@@ -63,13 +69,26 @@ class ChatSource:
         if self._terminal is not None:
             self._terminal.close()
 
-    def _ensure_terminal(self) -> None:
-        if not self.enable_terminal or self._terminal is not None:
-            return
+        if self._ipc is not None:
+            from sources.chat_ipc import set_active_chat_server
 
-        # Lazy import avoids coupling the generic chat source to a terminal at
-        # module import time. Future transports can feed submit() directly.
-        from sources.terminal_chat import TerminalChatInput
+            self._ipc.close()
+            set_active_chat_server(None)
 
-        self._terminal = TerminalChatInput(self)
-        self._terminal.start()
+    def _ensure_transports(self) -> None:
+        if self.enable_ipc and self._ipc is None:
+            from sources.chat_ipc import ChatIPCServer, set_active_chat_server
+
+            self._ipc = ChatIPCServer(
+                self,
+                host=self.ipc_host,
+                port=self.ipc_port,
+            )
+            set_active_chat_server(self._ipc)
+            self._ipc.start()
+
+        if self.enable_terminal and self._terminal is None:
+            from sources.terminal_chat import TerminalChatInput
+
+            self._terminal = TerminalChatInput(self)
+            self._terminal.start()
