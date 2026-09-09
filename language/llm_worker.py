@@ -10,6 +10,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from sources.chat_ipc import publish_chat_reply
+from sources.screen_bus import latest_screen_context
 from sources.text_bus import drain_text_inputs
 
 
@@ -151,6 +152,7 @@ class LLMWorker:
                     "dialogue": {},
                     "memory": {},
                     "visual": {},
+                    "screen": latest_screen_context(),
                 },
                 timestamp=packet.timestamp,
             )
@@ -221,6 +223,7 @@ class LLMWorker:
         posture = job.context.get("posture")
         motion = job.context.get("motion")
         visual = job.context.get("visual") or {}
+        screen = job.context.get("screen") or {}
 
         system_prompt = (
             "You are Indoor AI, the voice of a small indoor AI robot. "
@@ -235,6 +238,8 @@ class LLMWorker:
             "Do not mention internal states, tracking, cameras, models, "
             "software, prompts, or implementation details. "
             "Use supplied context only when useful. "
+            "Screen availability metadata only means a desktop frame exists; "
+            "it does not describe the frame contents. "
             "For questions about what you can currently see, only claim visual facts "
             "that are explicitly present in the supplied visual context. "
             "Never guess a visual detail that is missing or unavailable. "
@@ -248,6 +253,7 @@ class LLMWorker:
             f"posture={posture}\n"
             f"motion={motion}\n"
             f"visual={visual}\n"
+            f"screen={screen}\n"
             f"dialogue_turns={dialogue.get('turn_count')}\n"
             f"last_user_text={dialogue.get('last_user_text')}\n"
         )
