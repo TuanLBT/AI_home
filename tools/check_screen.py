@@ -12,37 +12,31 @@ from sources.screen import ScreenSource
 
 
 def main() -> None:
-    source = ScreenSource(capture_interval_s=0.5)
+    source = ScreenSource()
     print(f"Screen source: {source.metadata()}")
-    print("Move/change something on screen. Ctrl+C to quit.")
-
-    last_available = False
+    print("Press Enter to capture. Ctrl+C to quit.")
 
     try:
         while True:
-            packets = source.update()
+            input()
+            packet = source.capture_now()
             context = source.latest_context()
 
-            if context.get("available") and not last_available:
+            if packet is None:
                 print(
-                    "SCREEN OK: "
-                    f"{context.get('width')}x{context.get('height')} "
-                    f"backend={context.get('capture_backend')}"
+                    "SCREEN ERROR: "
+                    f"{context.get('capture_error', 'capture failed')}"
                 )
-                last_available = True
+                continue
 
-            for packet in packets:
-                meta = packet.metadata
-                print(
-                    "SCREEN CHANGED: "
-                    f"score={meta.get('change_score', 0.0):.4f} "
-                    f"size={meta.get('width')}x{meta.get('height')}"
-                )
-
-            if not context.get("available") and context.get("capture_error"):
-                print(f"SCREEN ERROR: {context['capture_error']}")
-                return
-
+            meta = packet.metadata
+            print(
+                "SCREEN OK: "
+                f"{meta.get('width')}x{meta.get('height')} "
+                f"backend={meta.get('capture_backend')} "
+                f"changed={meta.get('changed')} "
+                f"score={meta.get('change_score', 0.0):.4f}"
+            )
             time.sleep(0.05)
 
     except KeyboardInterrupt:
