@@ -26,10 +26,16 @@ def publish_screen_representation(representation: dict) -> None:
 
 
 def request_screen_capture() -> None:
-    """Ask the active ScreenSource to capture one fresh frame."""
-    global _capture_requested
+    """Ask the active ScreenSource to capture one fresh frame.
+
+    Clear the previous derived representation immediately so a new screen
+    question can never accidentally reuse facts from an older screenshot if
+    fresh capture/perception fails.
+    """
+    global _capture_requested, _latest_representation
     with _lock:
         _capture_requested = True
+        _latest_representation = None
 
 
 def consume_screen_capture_request() -> bool:
