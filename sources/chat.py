@@ -4,6 +4,7 @@ import time
 from collections import deque
 
 from sources.base import SourcePacket
+from sources.screen_bus import request_screen_capture
 from sources.text_bus import publish_text
 
 
@@ -54,6 +55,11 @@ class ChatSource:
             confidence=1.0,
             metadata=dict(metadata or {}),
         )
+
+        # One fresh screen capture per chat turn. The runtime consumes this
+        # request before the text reaches the LLM, so chat context can use the
+        # latest screen snapshot without continuously polling the desktop.
+        request_screen_capture()
 
         self._queue.append(packet)
         publish_text(packet)
