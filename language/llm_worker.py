@@ -11,6 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from language.semantic_router import SemanticObservationRouter
+from memory.router_corrections import RouterCorrectionStore
 from perception.screen_vision import ScreenVisionPerception
 from sources.chat_ipc import publish_chat_reply
 from sources.screen_bus import (
@@ -31,12 +32,11 @@ class LLMJob:
 
 
 class LLMWorker:
-    """Non-blocking Ollama responder with semantic observation routing.
+    """Non-blocking responder with learned semantic observation routing.
 
-    Every turn is first planned into zero or more observation requests. Source
-    acquisition is then performed only for requested evidence. The planner is
-    generic: screen is merely one supported source today, not a special case in
-    ChatSource or a keyword trigger.
+    The semantic planner can learn from human corrections in chat. Corrections
+    are stored as data and retrieved as future examples; no keyword or prompt
+    edit is required for each newly taught distinction.
     """
 
     def __init__(
@@ -56,6 +56,7 @@ class LLMWorker:
             base_url=self.base_url,
             model=os.environ.get("INDOOR_AI_ROUTER_MODEL") or self.model,
         )
+        self.router_corrections = RouterCorrectionStore()
         self.screen_vision = ScreenVisionPerception(base_url=self.base_url)
 
         self._jobs: queue.Queue[LLMJob | None] = queue.Queue(maxsize=1)
@@ -64,6 +65,7 @@ class LLMWorker:
         self._submit_lock = threading.Lock()
         self._request_counter = 0
         self._latest_request_id: dict[str, int] = {}
+        self._last_turn: dict[str, dict] = {}
         self._closed = False
 
         self._worker = threading.Thread(
@@ -395,19 +397,68 @@ class LLMWorker:
 
         return observations
 
+    def _learn_from_correction(
+        self,
+        job: LLMJob,
+        route: dict,
+        previous_turn: dict | None,
+    ) -> dict | None:
+        correction = route.get("correction")
+        if not isinstance(correction, dict):
+            return None
+        if not correction.get("applies_to_previous_turn") or not previous_turn:
+            return None
+
+        record = {
+            "type": "routing_correction",
+            "entity_id": job.entity_id,
+            "input_text": previous_turn.get("user_text", ""),
+            "previous_requests": (
+                (previous_turn.get("route") or {}).get("requests") or []
+            ),
+            "previous_reply": previous_turn.get("reply", ""),
+            "feedback_text": job.text,
+            "corrected_requests": correction.get("corrected_requests") or [],
+            "lesson": correction.get("lesson") or "",
+            "label_origin": "human",
+            "verified": True,
+        }
+        self.router_corrections.append(record)
+        return record
+
     def _generate(self, job: LLMJob) -> dict:
+        previous_turn = self._last_turn.get(job.entity_id)
+        learned_examples = self.router_corrections.examples_for(job.text)
+
         try:
-            route = self.router.route(job.text)
+            route = self.router.route(
+                job.text,
+                previous_turn=previous_turn,
+                learned_examples=learned_examples,
+            )
         except Exception as exc:
             route = {
                 "model": self.router.model,
                 "requests": [],
+                "correction": {
+                    "applies_to_previous_turn": False,
+                    "corrected_requests": [],
+                    "lesson": "",
+                },
                 "error": str(exc),
             }
 
+        learned_record = self._learn_from_correction(job, route, previous_turn)
         observations = self._acquire_observations(job, route)
         job.context["observation_route"] = route
         job.context["observations"] = observations
+        job.context["router_learning"] = {
+            "retrieved_examples": len(learned_examples),
+            "learned_this_turn": learned_record is not None,
+            "lesson": (
+                learned_record.get("lesson", "") if learned_record else ""
+            ),
+        }
 
         dialogue = job.context.get("dialogue") or {}
         posture = job.context.get("posture")
@@ -418,6 +469,7 @@ class LLMWorker:
             "You are Indoor AI, the voice of a small indoor AI robot. "
             "Reply naturally and directly in Japanese. "
             "Answer the current user utterance directly and prioritize it over prior context. "
+            "If router_learning.learned_this_turn is true, the user just taught a correction; acknowledge it briefly and do not pretend the corrected observation already happened. "
             "Do not repeat your previous reply unless the user explicitly asks you to repeat it. "
             "Do not answer with your name unless the user is actually asking your name or identity. "
             "Answer the user's actual question instead of giving generic replies. "
@@ -440,6 +492,7 @@ class LLMWorker:
             f"visual={json.dumps(visual, ensure_ascii=False)}\n"
             f"observation_route={json.dumps(route, ensure_ascii=False)}\n"
             f"observations={json.dumps(observations, ensure_ascii=False)}\n"
+            f"router_learning={json.dumps(job.context['router_learning'], ensure_ascii=False)}\n"
             f"dialogue_turns={dialogue.get('turn_count')}\n"
             f"last_user_text={dialogue.get('last_user_text')}\n"
         )
@@ -482,6 +535,13 @@ class LLMWorker:
         text = data.get("message", {}).get("content", "").strip()
         if not text:
             raise RuntimeError("Ollama returned an empty reply.")
+
+        self._last_turn[job.entity_id] = {
+            "user_text": job.text,
+            "route": route,
+            "reply": text,
+            "timestamp": job.timestamp,
+        }
 
         return {
             "type": "LLM_REPLY",
