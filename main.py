@@ -15,7 +15,6 @@ from behavior.behavior_engine import BehaviorEngine
 from action.action_executor import ActionExecutor
 from memory.interaction_memory import InteractionMemory
 from memory.experience_store import ExperienceStore
-from audio.mic_vad import MicVAD
 from audio.asr_worker import ASRWorker
 from language.intent_engine import IntentEngine
 from language.voice_event_engine import VoiceEventEngine
@@ -27,6 +26,10 @@ from learning.pose_concept_observer import PoseConceptObserver
 from perception.visual_facts import enrich_person_visual_facts
 from perception.object_worker import ObjectWorker
 from perception.object_grounding import apply_held_object_grounding
+from sources.audio import MicVADAudioSource
+from sources.camera import OpenCVCameraSource
+from sources.chat import ChatSource
+from sources.screen import ScreenSource
 
 
 SKELETON = [
@@ -419,13 +422,9 @@ def print_behavior_event(event: dict):
 def main():
     cfg = Config()
 
-    cap = cv2.VideoCapture(cfg.camera_index)
-
-    if not cap.isOpened():
-        raise RuntimeError(
-            f"Cannot open camera index {cfg.camera_index}. "
-            "Try changing camera_index in config.py."
-        )
+    camera_source = OpenCVCameraSource(cfg.camera_index)
+    chat_source = ChatSource()
+    screen_source = ScreenSource()
 
     perception = PersonPoseTracker(
         model_name=cfg.model_name,
@@ -476,12 +475,12 @@ def main():
     except (FileNotFoundError, ValueError) as exc:
         print(f"Learned pose shadow disabled: {exc}")
 
-    mic = MicVAD()
-    mic.start()
+    audio_source = MicVADAudioSource()
+    audio_source.start()
 
     asr = ASRWorker(
         model_size="base",
-        language="ja",
+        language="vi",
         device="cpu",
         compute_type="int8",
     )
@@ -515,17 +514,26 @@ def main():
     print(f"Device: {cfg.device}")
     print(f"AI perception rate: {cfg.perception_fps:.1f} FPS")
     print(f"Model: {cfg.model_name}")
+    print(f"Camera source: {camera_source.metadata()}")
+    print(f"Audio source: {audio_source.metadata()}")
+    print("Desktop source adapters ready: chat + screen")
+    print("ASR input language: vi")
     print("Press Q or ESC to quit.")
 
     try:
         while True:
-            ok, frame = cap.read()
+            ok, frame = camera_source.read()
 
             if not ok:
                 print("Camera frame read failed.")
                 break
 
             now = time.monotonic()
+
+            # Chat and screen are now first-class source adapters. Their
+            # concrete desktop UI/capture backends will be attached later.
+            chat_source.update()
+            screen_source.update()
 
             for object_event in object_worker.update():
                 if object_event["type"] == "OBJECT_DETECTIONS":
@@ -539,11 +547,11 @@ def main():
                 object_worker.submit(frame, timestamp=now)
                 next_object_time = now + object_interval_s
 
-            mic.set_suppressed(
+            audio_source.set_suppressed(
                 action_executor.speech.listen_blocked
             )
 
-            audio_events = mic.update()
+            audio_events = audio_source.update()
 
             for event in audio_events:
                 print_audio_event(event)
@@ -940,8 +948,8 @@ def main():
         llm.close()
         object_worker.close()
         brain.close()
-        mic.stop()
-        cap.release()
+        audio_source.close()
+        camera_source.close()
         cv2.destroyAllWindows()
 
 
