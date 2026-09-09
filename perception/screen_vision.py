@@ -10,6 +10,7 @@ import urllib.request
 import cv2
 import numpy as np
 
+from perception.screen_ocr import ScreenOCR
 from sources.base import SourcePacket
 from sources.screen_bus import publish_screen_representation
 
@@ -17,10 +18,10 @@ from sources.screen_bus import publish_screen_representation
 class ScreenVisionPerception:
     """Turn desktop screenshots into grounded per-monitor screen state.
 
-    Very wide frames are treated as an extended desktop and split into monitor
-    regions before vision inference. Qwen3-VL 4B is currently more reliable on
-    a concise prose task than strict structured generation, so each monitor is
-    described independently and kept separate in the published representation.
+    Qwen3-VL handles visual/layout understanding. A separate local OCR adapter
+    reads small text from the same monitor image. Keeping those evidences
+    separate avoids asking the VLM to guess exact tiny text such as clock/date,
+    temperatures or terminal lines.
     """
 
     def __init__(
@@ -33,6 +34,7 @@ class ScreenVisionPerception:
         max_pixels: int = 2_300_000,
         jpeg_quality: int = 82,
         extended_aspect_threshold: float = 2.2,
+        ocr: ScreenOCR | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = (
@@ -48,6 +50,7 @@ class ScreenVisionPerception:
             1.5,
             float(extended_aspect_threshold),
         )
+        self.ocr = ocr or ScreenOCR()
 
     def metadata(self) -> dict:
         return {
@@ -55,8 +58,9 @@ class ScreenVisionPerception:
             "model": self.model,
             "max_width": self.max_width,
             "max_pixels": self.max_pixels,
-            "representation": "per_monitor_grounded_prose_v1",
+            "representation": "per_monitor_vlm_ocr_v1",
             "multi_monitor": True,
+            "ocr": self.ocr.metadata(),
         }
 
     def describe(self, packet: SourcePacket) -> dict:
@@ -79,8 +83,11 @@ class ScreenVisionPerception:
 
         for index, region in enumerate(regions):
             position = self._monitor_position(index, len(regions))
+            prepared = self._prepare_region(region)
+            ocr_result = self.ocr.read(prepared)
+
             try:
-                encoded, width, height = self._encode_frame(region)
+                encoded, width, height = self._encode_prepared(prepared)
                 description = self._ask_vlm(encoded)
                 monitors.append(
                     {
@@ -88,19 +95,23 @@ class ScreenVisionPerception:
                         "position": position,
                         "available": True,
                         "description": description,
+                        "ocr": ocr_result,
                         "input_width": width,
                         "input_height": height,
                     }
                 )
             except Exception as exc:
-                # One bad monitor must not discard evidence from the other one.
+                # OCR is independent evidence. Preserve it even if VLM fails.
                 monitors.append(
                     {
                         "id": f"monitor_{index}",
                         "position": position,
-                        "available": False,
+                        "available": bool(ocr_result.get("available")),
                         "description": "",
-                        "error": str(exc),
+                        "ocr": ocr_result,
+                        "vision_error": str(exc),
+                        "input_width": int(prepared.shape[1]),
+                        "input_height": int(prepared.shape[0]),
                     }
                 )
 
@@ -117,7 +128,7 @@ class ScreenVisionPerception:
             "timestamp": packet.timestamp,
             "backend": "ollama_vlm",
             "model": self.model,
-            "schema": "per_monitor_grounded_prose_v1",
+            "schema": "per_monitor_vlm_ocr_v1",
             "monitor_count": len(monitors),
             "monitors": monitors,
             "description": description,
@@ -126,12 +137,14 @@ class ScreenVisionPerception:
         }
 
         if not available_monitors:
-            errors = [
-                str(m.get("error"))
-                for m in monitors
-                if m.get("error")
-            ]
-            result["error"] = "; ".join(errors) or "all monitor vision calls failed"
+            errors: list[str] = []
+            for monitor in monitors:
+                if monitor.get("vision_error"):
+                    errors.append(str(monitor["vision_error"]))
+                ocr_error = (monitor.get("ocr") or {}).get("error")
+                if ocr_error:
+                    errors.append(str(ocr_error))
+            result["error"] = "; ".join(errors) or "all monitor perception failed"
 
         publish_screen_representation(result)
         return result
@@ -140,9 +153,6 @@ class ScreenVisionPerception:
         height, width = frame.shape[:2]
         aspect = width / max(1.0, float(height))
 
-        # Current KDE/Wayland capture returns the whole extended desktop. For
-        # the user's side-by-side two-monitor layout, a very wide frame is split
-        # into left and right display regions before VLM inference.
         if aspect >= self.extended_aspect_threshold:
             split_x = width // 2
             if split_x >= 640 and (width - split_x) >= 640:
@@ -161,14 +171,10 @@ class ScreenVisionPerception:
             return "single"
         return f"region_{index}"
 
-    def _encode_frame(self, frame: np.ndarray) -> tuple[str, int, int]:
+    def _prepare_region(self, frame: np.ndarray) -> np.ndarray:
         rgb = frame
         height, width = rgb.shape[:2]
 
-        # A split 4096x2880 monitor resized only by width becomes 2560x1800,
-        # which is roughly twice the pixel load of the previously successful
-        # 2560x900 panorama. Cap both width and total pixel count so vision-token
-        # usage stays near the known-good range while preserving aspect ratio.
         scale = min(1.0, self.max_width / float(width))
         scaled_pixels = (width * scale) * (height * scale)
         if scaled_pixels > self.max_pixels:
@@ -181,6 +187,9 @@ class ScreenVisionPerception:
             )
             rgb = cv2.resize(rgb, target, interpolation=cv2.INTER_AREA)
 
+        return rgb
+
+    def _encode_prepared(self, rgb: np.ndarray) -> tuple[str, int, int]:
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         ok, encoded = cv2.imencode(
             ".jpg",
@@ -195,15 +204,13 @@ class ScreenVisionPerception:
         return image_b64, int(out_w), int(out_h)
 
     def _ask_vlm(self, image_b64: str) -> str:
-        # This prose task already proved reliable on qwen3-vl:4b. Keep monitor
-        # identity outside the model response rather than forcing JSON, which
-        # repeatedly caused the model to spend its whole budget in thinking.
         prompt = (
             "/no_think\n"
             "Describe this ONE monitor screenshot concisely using only visible "
-            "evidence. Mention apps/windows, important readable text, errors or "
-            "dialogs, and obvious UI state. Do not describe anything outside "
-            "this screenshot. Do not guess. No reasoning preamble."
+            "evidence. Focus on layout, apps/windows, dialogs and obvious UI "
+            "state. For tiny text, do not guess exact values; a separate OCR "
+            "reader handles exact text. Do not describe anything outside this "
+            "screenshot. No reasoning preamble."
         )
 
         data = self._request_vlm(
