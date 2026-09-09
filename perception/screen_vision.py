@@ -13,6 +13,50 @@ from sources.base import SourcePacket
 from sources.screen_bus import publish_screen_representation
 
 
+SCREEN_STATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "active_app": {"type": ["string", "null"]},
+        "windows": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 8,
+        },
+        "visible_text": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 8,
+        },
+        "errors": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 6,
+        },
+        "dialogs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 4,
+        },
+        "ui_state": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 6,
+        },
+        "description": {"type": "string"},
+    },
+    "required": [
+        "active_app",
+        "windows",
+        "visible_text",
+        "errors",
+        "dialogs",
+        "ui_state",
+        "description",
+    ],
+    "additionalProperties": False,
+}
+
+
 class ScreenVisionPerception:
     """Turn a raw desktop screenshot into a neutral structured representation.
 
@@ -106,7 +150,6 @@ class ScreenVisionPerception:
             )
             rgb = cv2.resize(rgb, target, interpolation=cv2.INTER_AREA)
 
-        # ScreenSource frames are RGB; OpenCV JPEG expects BGR.
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         ok, encoded = cv2.imencode(
             ".jpg",
@@ -122,48 +165,56 @@ class ScreenVisionPerception:
 
     def _ask_vlm(self, image_b64: str) -> dict:
         prompt = (
-            "Analyze this current desktop screenshot as evidence for another agent. "
-            "Return ONLY one JSON object, no markdown and no explanation. "
-            "Use exactly these keys:\n"
-            "{\n"
-            '  "active_app": string or null,\n'
-            '  "windows": [string],\n'
-            '  "visible_text": [string],\n'
-            '  "errors": [string],\n'
-            '  "dialogs": [string],\n'
-            '  "ui_state": [string],\n'
-            '  "description": string\n'
-            "}\n"
-            "Only include details visibly supported by the screenshot. "
-            "Keep each list short and useful. Preserve important readable error text when visible. "
-            "Do not infer hidden content or user intent. The description should be a compact summary.\n"
-            "/no_think"
+            "/no_think\n"
+            "Inspect this desktop screenshot. Return the requested JSON only. "
+            "Record only visible evidence: active app, windows, useful readable "
+            "text, errors, dialogs, and obvious UI state. Keep entries short. "
+            "Do not infer hidden content."
         )
 
         data = self._request_vlm(
             image_b64=image_b64,
             prompt=prompt,
-            num_predict=768,
+            num_predict=640,
+            output_format=SCREEN_STATE_SCHEMA,
         )
 
         message = data.get("message") or {}
         text = str(message.get("content") or "").strip()
 
         if not text:
-            thinking = str(message.get("thinking") or "").strip()
-            if thinking:
-                data = self._request_vlm(
-                    image_b64=image_b64,
-                    prompt=prompt,
-                    num_predict=1536,
-                )
-                message = data.get("message") or {}
-                text = str(message.get("content") or "").strip()
+            # Qwen3-VL can occasionally spend the whole output budget in its
+            # thinking channel despite think=false. Fall back to the simpler
+            # prose task that has proven much less likely to trigger that path,
+            # so screen questions still work instead of failing completely.
+            fallback_prompt = (
+                "/no_think\n"
+                "Describe this desktop screenshot concisely using only visible "
+                "evidence. Mention apps/windows, important readable text, errors "
+                "or dialogs, and obvious UI state. No reasoning preamble."
+            )
+            fallback = self._request_vlm(
+                image_b64=image_b64,
+                prompt=fallback_prompt,
+                num_predict=768,
+                output_format=None,
+            )
+            fallback_message = fallback.get("message") or {}
+            description = str(fallback_message.get("content") or "").strip()
+            if description:
+                return {
+                    "active_app": None,
+                    "windows": [],
+                    "visible_text": [],
+                    "errors": [],
+                    "dialogs": [],
+                    "ui_state": [],
+                    "description": description,
+                }
 
-        if not text:
-            done_reason = data.get("done_reason")
+            done_reason = fallback.get("done_reason")
             thinking_len = len(
-                str((data.get("message") or {}).get("thinking") or "")
+                str(fallback_message.get("thinking") or "")
             )
             raise RuntimeError(
                 "vision model returned empty content "
@@ -175,7 +226,6 @@ class ScreenVisionPerception:
     def _parse_state(self, text: str) -> dict:
         candidate = text.strip()
 
-        # Be tolerant if the model ignores the no-markdown request once.
         if candidate.startswith("```"):
             lines = candidate.splitlines()
             if lines and lines[0].startswith("```"):
@@ -186,19 +236,10 @@ class ScreenVisionPerception:
 
         try:
             raw = json.loads(candidate)
-        except json.JSONDecodeError:
-            start = candidate.find("{")
-            end = candidate.rfind("}")
-            if start < 0 or end <= start:
-                raise RuntimeError(
-                    "vision model did not return valid structured JSON"
-                )
-            try:
-                raw = json.loads(candidate[start : end + 1])
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    "vision model returned malformed structured JSON"
-                ) from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "vision model returned malformed structured JSON"
+            ) from exc
 
         if not isinstance(raw, dict):
             raise RuntimeError("vision structured response is not an object")
@@ -219,7 +260,6 @@ class ScreenVisionPerception:
                     out.append(cleaned)
             return out[:12]
 
-        description = clean_text(raw.get("description")) or ""
         return {
             "active_app": clean_text(raw.get("active_app")),
             "windows": clean_list(raw.get("windows")),
@@ -227,7 +267,7 @@ class ScreenVisionPerception:
             "errors": clean_list(raw.get("errors")),
             "dialogs": clean_list(raw.get("dialogs")),
             "ui_state": clean_list(raw.get("ui_state")),
-            "description": description,
+            "description": clean_text(raw.get("description")) or "",
         }
 
     def _request_vlm(
@@ -236,6 +276,7 @@ class ScreenVisionPerception:
         image_b64: str,
         prompt: str,
         num_predict: int,
+        output_format: dict | None,
     ) -> dict:
         body = {
             "model": self.model,
@@ -249,11 +290,13 @@ class ScreenVisionPerception:
                 }
             ],
             "options": {
-                "temperature": 0.1,
+                "temperature": 0.0,
                 "num_predict": int(num_predict),
             },
             "keep_alive": "10m",
         }
+        if output_format is not None:
+            body["format"] = output_format
 
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
