@@ -13,56 +13,13 @@ from sources.base import SourcePacket
 from sources.screen_bus import publish_screen_representation
 
 
-SCREEN_STATE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "active_app": {"type": ["string", "null"]},
-        "windows": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 8,
-        },
-        "visible_text": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 8,
-        },
-        "errors": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 6,
-        },
-        "dialogs": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 4,
-        },
-        "ui_state": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": 6,
-        },
-        "description": {"type": "string"},
-    },
-    "required": [
-        "active_app",
-        "windows",
-        "visible_text",
-        "errors",
-        "dialogs",
-        "ui_state",
-        "description",
-    ],
-    "additionalProperties": False,
-}
-
-
 class ScreenVisionPerception:
-    """Turn desktop screenshots into grounded structured screen state.
+    """Turn desktop screenshots into grounded per-monitor screen state.
 
     Very wide frames are treated as an extended desktop and split into monitor
-    regions before vision inference. This preserves text/layout detail instead
-    of shrinking the entire multi-monitor panorama into one tiny image.
+    regions before vision inference. Qwen3-VL 4B is currently more reliable on
+    a concise prose task than strict structured generation, so each monitor is
+    described independently and kept separate in the published representation.
     """
 
     def __init__(
@@ -94,7 +51,7 @@ class ScreenVisionPerception:
             "backend": "ollama_vlm",
             "model": self.model,
             "max_width": self.max_width,
-            "representation": "structured_screen_state_v2",
+            "representation": "per_monitor_grounded_prose_v1",
             "multi_monitor": True,
         }
 
@@ -113,67 +70,64 @@ class ScreenVisionPerception:
             publish_screen_representation(result)
             return result
 
-        try:
-            regions = self._monitor_regions(frame)
-            monitors: list[dict] = []
+        regions = self._monitor_regions(frame)
+        monitors: list[dict] = []
 
-            for index, region in enumerate(regions):
+        for index, region in enumerate(regions):
+            position = self._monitor_position(index, len(regions))
+            try:
                 encoded, width, height = self._encode_frame(region)
-                state = self._ask_vlm(encoded)
+                description = self._ask_vlm(encoded)
                 monitors.append(
                     {
                         "id": f"monitor_{index}",
-                        "position": self._monitor_position(index, len(regions)),
-                        "active_app": state.get("active_app"),
-                        "windows": state.get("windows", []),
-                        "visible_text": state.get("visible_text", []),
-                        "errors": state.get("errors", []),
-                        "dialogs": state.get("dialogs", []),
-                        "ui_state": state.get("ui_state", []),
-                        "description": state.get("description", ""),
+                        "position": position,
+                        "available": True,
+                        "description": description,
                         "input_width": width,
                         "input_height": height,
                     }
                 )
+            except Exception as exc:
+                # One bad monitor must not discard evidence from the other one.
+                monitors.append(
+                    {
+                        "id": f"monitor_{index}",
+                        "position": position,
+                        "available": False,
+                        "description": "",
+                        "error": str(exc),
+                    }
+                )
 
-            description = " | ".join(
-                f"{monitor['id']} ({monitor['position']}): "
-                f"{monitor.get('description', '')}"
-                for monitor in monitors
-                if monitor.get("description")
-            )
+        available_monitors = [m for m in monitors if m.get("available")]
+        description = " | ".join(
+            f"{monitor['id']} ({monitor['position']}): "
+            f"{monitor.get('description', '')}"
+            for monitor in available_monitors
+            if monitor.get("description")
+        )
 
-            result = {
-                "available": True,
-                "timestamp": packet.timestamp,
-                "backend": "ollama_vlm",
-                "model": self.model,
-                "schema": "structured_screen_state_v2",
-                "monitor_count": len(monitors),
-                "monitors": monitors,
-                # Compatibility fields for callers that still expect v1.
-                "active_app": (
-                    monitors[0].get("active_app")
-                    if len(monitors) == 1
-                    else None
-                ),
-                "windows": self._merge_lists(monitors, "windows"),
-                "visible_text": self._merge_lists(monitors, "visible_text"),
-                "errors": self._merge_lists(monitors, "errors"),
-                "dialogs": self._merge_lists(monitors, "dialogs"),
-                "ui_state": self._merge_lists(monitors, "ui_state"),
-                "description": description,
-                "source_width": int(frame.shape[1]),
-                "source_height": int(frame.shape[0]),
-            }
-        except Exception as exc:
-            result = {
-                "available": False,
-                "timestamp": packet.timestamp,
-                "backend": "ollama_vlm",
-                "model": self.model,
-                "error": str(exc),
-            }
+        result = {
+            "available": bool(available_monitors),
+            "timestamp": packet.timestamp,
+            "backend": "ollama_vlm",
+            "model": self.model,
+            "schema": "per_monitor_grounded_prose_v1",
+            "monitor_count": len(monitors),
+            "monitors": monitors,
+            "description": description,
+            "source_width": int(frame.shape[1]),
+            "source_height": int(frame.shape[0]),
+        }
+
+        if not available_monitors:
+            errors = [
+                str(m.get("error"))
+                for m in monitors
+                if m.get("error")
+            ]
+            result["error"] = "; ".join(errors) or "all monitor vision calls failed"
 
         publish_screen_representation(result)
         return result
@@ -184,7 +138,7 @@ class ScreenVisionPerception:
 
         # Current KDE/Wayland capture returns the whole extended desktop. For
         # the user's side-by-side two-monitor layout, a very wide frame is split
-        # into left and right physical-display regions before VLM inference.
+        # into left and right display regions before VLM inference.
         if aspect >= self.extended_aspect_threshold:
             split_x = width // 2
             if split_x >= 640 and (width - split_x) >= 640:
@@ -202,16 +156,6 @@ class ScreenVisionPerception:
         if count == 1:
             return "single"
         return f"region_{index}"
-
-    @staticmethod
-    def _merge_lists(monitors: list[dict], key: str) -> list[str]:
-        out: list[str] = []
-        for monitor in monitors:
-            for item in monitor.get(key, []) or []:
-                value = str(item).strip()
-                if value and value not in out:
-                    out.append(value)
-        return out[:16]
 
     def _encode_frame(self, frame: np.ndarray) -> tuple[str, int, int]:
         rgb = frame
@@ -238,108 +182,34 @@ class ScreenVisionPerception:
         image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
         return image_b64, int(out_w), int(out_h)
 
-    def _ask_vlm(self, image_b64: str) -> dict:
+    def _ask_vlm(self, image_b64: str) -> str:
+        # This prose task already proved reliable on qwen3-vl:4b. Keep monitor
+        # identity outside the model response rather than forcing JSON, which
+        # repeatedly caused the model to spend its whole budget in thinking.
         prompt = (
             "/no_think\n"
-            "Inspect this ONE monitor screenshot. Return the requested JSON only. "
-            "Record only visible evidence: active app, windows, useful readable "
-            "text, errors, dialogs, and obvious UI state. Keep entries short. "
-            "Do not infer anything outside this monitor."
+            "Describe this ONE monitor screenshot concisely using only visible "
+            "evidence. Mention apps/windows, important readable text, errors or "
+            "dialogs, and obvious UI state. Do not describe anything outside "
+            "this screenshot. Do not guess. No reasoning preamble."
         )
 
         data = self._request_vlm(
             image_b64=image_b64,
             prompt=prompt,
-            num_predict=640,
-            output_format=SCREEN_STATE_SCHEMA,
+            num_predict=768,
         )
-
         message = data.get("message") or {}
         text = str(message.get("content") or "").strip()
+        if text:
+            return text
 
-        if not text:
-            fallback_prompt = (
-                "/no_think\n"
-                "Describe this ONE monitor screenshot concisely using only visible "
-                "evidence. Mention apps/windows, important readable text, errors "
-                "or dialogs, and obvious UI state. No reasoning preamble."
-            )
-            fallback = self._request_vlm(
-                image_b64=image_b64,
-                prompt=fallback_prompt,
-                num_predict=768,
-                output_format=None,
-            )
-            fallback_message = fallback.get("message") or {}
-            description = str(fallback_message.get("content") or "").strip()
-            if description:
-                return {
-                    "active_app": None,
-                    "windows": [],
-                    "visible_text": [],
-                    "errors": [],
-                    "dialogs": [],
-                    "ui_state": [],
-                    "description": description,
-                }
-
-            done_reason = fallback.get("done_reason")
-            thinking_len = len(
-                str(fallback_message.get("thinking") or "")
-            )
-            raise RuntimeError(
-                "vision model returned empty content "
-                f"(done_reason={done_reason!r}, thinking_chars={thinking_len})"
-            )
-
-        return self._parse_state(text)
-
-    def _parse_state(self, text: str) -> dict:
-        candidate = text.strip()
-
-        if candidate.startswith("```"):
-            lines = candidate.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip().startswith("```"):
-                lines = lines[:-1]
-            candidate = "\n".join(lines).strip()
-
-        try:
-            raw = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "vision model returned malformed structured JSON"
-            ) from exc
-
-        if not isinstance(raw, dict):
-            raise RuntimeError("vision structured response is not an object")
-
-        def clean_text(value) -> str | None:
-            if value is None:
-                return None
-            value = str(value).strip()
-            return value or None
-
-        def clean_list(value) -> list[str]:
-            if not isinstance(value, list):
-                return []
-            out: list[str] = []
-            for item in value:
-                cleaned = clean_text(item)
-                if cleaned is not None:
-                    out.append(cleaned)
-            return out[:12]
-
-        return {
-            "active_app": clean_text(raw.get("active_app")),
-            "windows": clean_list(raw.get("windows")),
-            "visible_text": clean_list(raw.get("visible_text")),
-            "errors": clean_list(raw.get("errors")),
-            "dialogs": clean_list(raw.get("dialogs")),
-            "ui_state": clean_list(raw.get("ui_state")),
-            "description": clean_text(raw.get("description")) or "",
-        }
+        done_reason = data.get("done_reason")
+        thinking_len = len(str(message.get("thinking") or ""))
+        raise RuntimeError(
+            "vision model returned empty content "
+            f"(done_reason={done_reason!r}, thinking_chars={thinking_len})"
+        )
 
     def _request_vlm(
         self,
@@ -347,7 +217,6 @@ class ScreenVisionPerception:
         image_b64: str,
         prompt: str,
         num_predict: int,
-        output_format: dict | None,
     ) -> dict:
         body = {
             "model": self.model,
@@ -366,8 +235,6 @@ class ScreenVisionPerception:
             },
             "keep_alive": "10m",
         }
-        if output_format is not None:
-            body["format"] = output_format
 
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
