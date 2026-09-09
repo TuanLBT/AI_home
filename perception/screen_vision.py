@@ -26,7 +26,7 @@ class ScreenVisionPerception:
         *,
         base_url: str = "http://192.168.128.120:11434",
         model: str | None = None,
-        timeout_s: float = 45.0,
+        timeout_s: float = 90.0,
         max_width: int = 2560,
         jpeg_quality: int = 82,
     ):
@@ -118,9 +118,50 @@ class ScreenVisionPerception:
             "agent. Describe only what is visibly supported. Focus on active "
             "apps/windows, important readable text, errors, dialogs, terminal "
             "output, and obvious UI state. Be concise but specific. Do not "
-            "invent hidden content."
+            "invent hidden content. Return the final description directly, "
+            "without a reasoning preamble.\n/no_think"
         )
 
+        data = self._request_vlm(
+            image_b64=image_b64,
+            prompt=prompt,
+            num_predict=768,
+        )
+
+        message = data.get("message") or {}
+        text = str(message.get("content") or "").strip()
+        if text:
+            return text
+
+        # Some Qwen3-VL/Ollama combinations can spend the whole generation
+        # budget in the thinking field and return HTTP 200 with empty content,
+        # even when think=false was requested. Retry once with a larger budget.
+        thinking = str(message.get("thinking") or "").strip()
+        if thinking:
+            data = self._request_vlm(
+                image_b64=image_b64,
+                prompt=prompt,
+                num_predict=1536,
+            )
+            message = data.get("message") or {}
+            text = str(message.get("content") or "").strip()
+            if text:
+                return text
+
+        done_reason = data.get("done_reason")
+        thinking_len = len(str((data.get("message") or {}).get("thinking") or ""))
+        raise RuntimeError(
+            "vision model returned empty content "
+            f"(done_reason={done_reason!r}, thinking_chars={thinking_len})"
+        )
+
+    def _request_vlm(
+        self,
+        *,
+        image_b64: str,
+        prompt: str,
+        num_predict: int,
+    ) -> dict:
         body = {
             "model": self.model,
             "stream": False,
@@ -134,7 +175,7 @@ class ScreenVisionPerception:
             ],
             "options": {
                 "temperature": 0.1,
-                "num_predict": 256,
+                "num_predict": int(num_predict),
             },
             "keep_alive": "10m",
         }
@@ -151,7 +192,7 @@ class ScreenVisionPerception:
                 request,
                 timeout=self.timeout_s,
             ) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(
@@ -161,8 +202,3 @@ class ScreenVisionPerception:
             raise RuntimeError(
                 f"cannot reach vision Ollama at {self.base_url}"
             ) from exc
-
-        text = data.get("message", {}).get("content", "").strip()
-        if not text:
-            raise RuntimeError("vision model returned an empty description")
-        return text
