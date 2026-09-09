@@ -12,7 +12,7 @@ from sources.screen import ScreenSource
 
 
 def main() -> None:
-    screen = ScreenSource(suppress_backend_stderr=False)
+    screen = ScreenSource()
     vision = ScreenVisionPerception()
 
     print(f"Screen: {screen.metadata()}")
