@@ -9,8 +9,9 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from perception.screen_vision import ScreenVisionPerception
 from sources.chat_ipc import publish_chat_reply
-from sources.screen_bus import latest_screen_context
+from sources.screen_bus import latest_screen, latest_screen_context
 from sources.text_bus import drain_text_inputs
 
 
@@ -34,7 +35,8 @@ class LLMWorker:
         LLM_REPLY
         LLM_ERROR
 
-    The camera/perception loop never waits for the LLM.
+    The camera/perception loop never waits for the LLM. Screen vision is also
+    performed on this worker thread only for turns that explicitly request it.
     """
 
     def __init__(
@@ -50,6 +52,9 @@ class LLMWorker:
         )
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
+        self.screen_vision = ScreenVisionPerception(
+            base_url=self.base_url,
+        )
 
         self._jobs: queue.Queue[LLMJob | None] = queue.Queue(
             maxsize=1
@@ -143,12 +148,16 @@ class LLMWorker:
                 continue
 
             entity_id = packet.entity_id or "desktop_user"
+            packet_metadata = dict(packet.metadata or {})
             self.submit(
                 entity_id=entity_id,
                 text=text,
                 context={
                     "input_source": packet.source,
-                    "input_metadata": dict(packet.metadata or {}),
+                    "input_metadata": packet_metadata,
+                    "screen_context_requested": bool(
+                        packet_metadata.get("screen_context_requested")
+                    ),
                     "dialogue": {},
                     "memory": {},
                     "visual": {},
@@ -219,6 +228,12 @@ class LLMWorker:
             self._jobs.task_done()
 
     def _generate(self, job: LLMJob) -> dict:
+        if job.context.get("screen_context_requested"):
+            screen_packet = latest_screen()
+            if screen_packet is not None:
+                self.screen_vision.describe(screen_packet)
+            job.context["screen"] = latest_screen_context()
+
         dialogue = job.context.get("dialogue") or {}
         posture = job.context.get("posture")
         motion = job.context.get("motion")
@@ -233,17 +248,14 @@ class LLMWorker:
             "Do not answer with your name unless the user is actually asking your name or identity. "
             "Answer the user's actual question instead of giving generic replies. "
             "If asked your name, say that your name is Indoor AI. "
-            "Keep answers short: normally one sentence, "
-            "at most two short sentences. "
-            "Do not mention internal states, tracking, cameras, models, "
-            "software, prompts, or implementation details. "
+            "Keep answers short: normally one sentence, at most two short sentences. "
+            "Do not mention internal states, tracking, cameras, models, software, prompts, or implementation details. "
             "Use supplied context only when useful. "
-            "Screen availability metadata only means a desktop frame exists; "
-            "it does not describe the frame contents. "
-            "For questions about what you can currently see, only claim visual facts "
-            "that are explicitly present in the supplied visual context. "
-            "Never guess a visual detail that is missing or unavailable. "
-            "If the requested visual fact is unavailable, say briefly that you cannot determine it right now. "
+            "For screen questions, the screen.representation field is derived visual evidence from the current desktop screenshot. "
+            "Use its description when available, but do not claim details that are not supported by that description. "
+            "Screen availability metadata alone does not describe frame contents. "
+            "For questions about what you can currently see, only claim visual facts explicitly present in visual or screen representation context. "
+            "If requested visual evidence is unavailable, say briefly that you cannot determine it right now. "
             "If you do not know something, say so briefly instead of inventing."
         )
 
