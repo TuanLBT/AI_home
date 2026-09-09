@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from sources.base import SourcePacket
+from sources.screen_bus import publish_screen
 
 try:
     from PIL import ImageGrab
@@ -107,6 +108,7 @@ class ScreenSource:
             },
         )
         self._latest_packet = packet
+        publish_screen(packet)
 
         # The latest frame is always retained for on-demand questions, while
         # only meaningful changes are emitted as new observations.
