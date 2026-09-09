@@ -230,9 +230,20 @@ class LLMWorker:
     def _generate(self, job: LLMJob) -> dict:
         if job.context.get("screen_context_requested"):
             screen_packet = latest_screen()
-            if screen_packet is not None:
+            fresh_screen = (
+                screen_packet is not None
+                and screen_packet.timestamp >= job.timestamp
+            )
+
+            if fresh_screen:
                 self.screen_vision.describe(screen_packet)
-            job.context["screen"] = latest_screen_context()
+                job.context["screen"] = latest_screen_context()
+            else:
+                job.context["screen"] = {
+                    "available": False,
+                    "representation": None,
+                    "error": "fresh screen capture unavailable",
+                }
 
         dialogue = job.context.get("dialogue") or {}
         posture = job.context.get("posture")
