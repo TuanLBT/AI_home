@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from sources.chat_ipc import publish_chat_reply
 from sources.text_bus import drain_text_inputs
 
 
@@ -95,9 +96,6 @@ class LLMWorker:
                 self._jobs.put_nowait(job)
                 return True
             except queue.Full:
-                # Keep only the newest pending utterance. An in-flight request
-                # cannot be cancelled safely, but its result is discarded by
-                # _is_latest() when a newer utterance exists.
                 try:
                     self._jobs.get_nowait()
                     self._jobs.task_done()
@@ -134,9 +132,6 @@ class LLMWorker:
             )
 
     def update(self) -> list[dict]:
-        # Chat, GUI, web, or any future text transport arrives here through
-        # the same normalized SourcePacket bus. ASR can continue to call
-        # submit() directly until speech is migrated onto the same bus.
         for packet in drain_text_inputs():
             if packet.modality != "text":
                 continue
@@ -164,11 +159,28 @@ class LLMWorker:
 
         while True:
             try:
-                results.append(
-                    self._results.get_nowait()
-                )
+                event = self._results.get_nowait()
             except queue.Empty:
                 break
+
+            results.append(event)
+
+            entity_id = event.get("entity_id")
+            if entity_id is None:
+                continue
+
+            if event.get("type") == "LLM_REPLY":
+                publish_chat_reply(
+                    entity_id,
+                    event.get("text", ""),
+                    error=False,
+                )
+            elif event.get("type") == "LLM_ERROR":
+                publish_chat_reply(
+                    entity_id,
+                    event.get("error", "LLM error"),
+                    error=True,
+                )
 
         return results
 
@@ -206,7 +218,6 @@ class LLMWorker:
 
     def _generate(self, job: LLMJob) -> dict:
         dialogue = job.context.get("dialogue") or {}
-        memory = job.context.get("memory") or {}
         posture = job.context.get("posture")
         motion = job.context.get("motion")
         visual = job.context.get("visual") or {}
@@ -246,18 +257,9 @@ class LLMWorker:
             "stream": False,
             "think": False,
             "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "system",
-                    "content": "Current context:\n" + context_text,
-                },
-                {
-                    "role": "user",
-                    "content": job.text,
-                },
+                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": "Current context:\n" + context_text},
+                {"role": "user", "content": job.text},
             ],
             "options": {
                 "temperature": 0.3,
@@ -269,9 +271,7 @@ class LLMWorker:
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-            },
+            headers={"Content-Type": "application/json"},
             method="POST",
         )
 
@@ -280,14 +280,9 @@ class LLMWorker:
                 request,
                 timeout=self.timeout_s,
             ) as response:
-                data = json.loads(
-                    response.read().decode("utf-8")
-                )
+                data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode(
-                "utf-8",
-                errors="replace",
-            )
+            body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(
                 f"Ollama HTTP {exc.code}: {body}"
             ) from exc
@@ -297,16 +292,10 @@ class LLMWorker:
                 f"{self.base_url}. Is `ollama serve` running?"
             ) from exc
 
-        text = (
-            data.get("message", {})
-            .get("content", "")
-            .strip()
-        )
+        text = data.get("message", {}).get("content", "").strip()
 
         if not text:
-            raise RuntimeError(
-                "Ollama returned an empty reply."
-            )
+            raise RuntimeError("Ollama returned an empty reply.")
 
         return {
             "type": "LLM_REPLY",
