@@ -3,9 +3,7 @@ from __future__ import annotations
 import time
 from collections import deque
 
-from language.screen_query import needs_screen_context
 from sources.base import SourcePacket
-from sources.screen_bus import request_screen_capture
 from sources.text_bus import publish_text
 
 
@@ -13,8 +11,8 @@ class ChatSource:
     """Queue-backed text source for desktop chat/UI integration.
 
     Text is normalized into SourcePacket and published onto the shared text
-    input bus. Desktop transport is attached lazily so the agent core does not
-    depend on terminal, GUI, web, or socket details.
+    input bus. This source does not decide which sensors/evidence are needed;
+    semantic observation routing happens later in the agent pipeline.
     """
 
     def __init__(
@@ -47,10 +45,6 @@ class ChatSource:
         if not text:
             return
 
-        wants_screen = needs_screen_context(text)
-        packet_metadata = dict(metadata or {})
-        packet_metadata["screen_context_requested"] = wants_screen
-
         packet = SourcePacket(
             source=self.source_name,
             modality="text",
@@ -58,11 +52,8 @@ class ChatSource:
             entity_id=entity_id,
             payload={"text": text},
             confidence=1.0,
-            metadata=packet_metadata,
+            metadata=dict(metadata or {}),
         )
-
-        if wants_screen:
-            request_screen_capture()
 
         self._queue.append(packet)
         publish_text(packet)
