@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
 import numpy as np
 
 from sources.base import SourcePacket
-from sources.screen_bus import publish_screen
+from sources.screen_bus import consume_screen_capture_request, publish_screen
 
 try:
     from PIL import ImageGrab
@@ -15,19 +16,17 @@ except ImportError:
 
 
 class ScreenSource:
-    """Desktop screen capture source with lightweight change detection.
+    """Desktop screen source with cached, on-demand capture.
 
-    The source owns the concrete desktop capture backend and exposes only
-    SourcePacket observations to the rest of the agent. This keeps higher
-    layers independent from X11/Wayland/PipeWire/etc. A future backend can
-    replace Pillow without changing the observation contract.
+    Continuous polling is intentionally avoided on KDE Wayland because Pillow
+    may spawn Spectacle for every grab. The source captures only when requested
+    (for example, by a chat turn) or when capture_now() is called explicitly.
     """
 
     def __init__(
         self,
         *,
         source_name: str = "screen",
-        capture_interval_s: float = 1.0,
         change_threshold: float = 0.015,
         analysis_size: tuple[int, int] = (160, 90),
         all_screens: bool = False,
@@ -39,16 +38,23 @@ class ScreenSource:
             )
 
         self.source_name = source_name
-        self.capture_interval_s = max(0.05, float(capture_interval_s))
         self.change_threshold = max(0.0, float(change_threshold))
         self.analysis_size = analysis_size
         self.all_screens = bool(all_screens)
 
-        self._next_capture_time = 0.0
         self._previous_analysis: np.ndarray | None = None
         self._latest_packet: SourcePacket | None = None
         self._latest_change_score: float | None = None
         self._capture_error: str | None = None
+
+        # Suppress noisy KDE/Spectacle Qt logging inherited by the helper
+        # process used by Pillow on Wayland. Existing user rules are preserved.
+        existing = os.environ.get("QT_LOGGING_RULES", "").strip()
+        quiet_rules = "kf.iconthemes=false;spectacle.debug=false"
+        if quiet_rules not in existing:
+            os.environ["QT_LOGGING_RULES"] = (
+                f"{existing};{quiet_rules}" if existing else quiet_rules
+            )
 
     def packet_from_frame(
         self,
@@ -71,11 +77,17 @@ class ScreenSource:
         )
 
     def update(self) -> list[SourcePacket]:
-        now = time.monotonic()
-        if now < self._next_capture_time:
+        if not consume_screen_capture_request():
             return []
 
-        self._next_capture_time = now + self.capture_interval_s
+        packet = self.capture_now()
+        if packet is None:
+            return []
+
+        return [packet] if packet.metadata.get("changed") else []
+
+    def capture_now(self) -> SourcePacket | None:
+        now = time.monotonic()
 
         try:
             image = ImageGrab.grab(all_screens=self.all_screens)
@@ -83,7 +95,7 @@ class ScreenSource:
             self._capture_error = None
         except Exception as exc:
             self._capture_error = str(exc)
-            return []
+            return None
 
         analysis = self._analysis_frame(frame)
         change_score = self._change_score(analysis)
@@ -104,15 +116,12 @@ class ScreenSource:
                 "channels": int(frame.shape[2]),
                 "change_score": float(change_score),
                 "changed": bool(changed),
-                "capture_backend": "pillow_imagegrab",
+                "capture_backend": "pillow_imagegrab_on_demand",
             },
         )
         self._latest_packet = packet
         publish_screen(packet)
-
-        # The latest frame is always retained for on-demand questions, while
-        # only meaningful changes are emitted as new observations.
-        return [packet] if changed else []
+        return packet
 
     def latest(self) -> SourcePacket | None:
         return self._latest_packet
@@ -139,15 +148,12 @@ class ScreenSource:
     def metadata(self) -> dict:
         return {
             "source_type": "desktop_screen",
-            "capabilities": ["rgb", "change_detection"],
-            "capture_interval_s": self.capture_interval_s,
+            "capabilities": ["rgb", "change_detection", "on_demand_capture"],
             "change_threshold": self.change_threshold,
-            "backend": "pillow_imagegrab",
+            "backend": "pillow_imagegrab_on_demand",
         }
 
     def _analysis_frame(self, frame: np.ndarray) -> np.ndarray:
-        # Cheap dependency-free resize for change detection. We sample a fixed
-        # grid instead of running a full image-processing pipeline.
         target_w, target_h = self.analysis_size
         h, w = frame.shape[:2]
 
@@ -155,7 +161,6 @@ class ScreenSource:
         ys = np.linspace(0, max(0, h - 1), target_h).astype(np.int32)
         sampled = frame[np.ix_(ys, xs)]
 
-        # Perceptual-ish grayscale is enough for screen-change evidence.
         gray = (
             sampled[..., 0].astype(np.float32) * 0.299
             + sampled[..., 1].astype(np.float32) * 0.587
