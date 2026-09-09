@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections import deque
 
+from language.screen_query import needs_screen_context
 from sources.base import SourcePacket
 from sources.screen_bus import request_screen_capture
 from sources.text_bus import publish_text
@@ -46,6 +47,10 @@ class ChatSource:
         if not text:
             return
 
+        wants_screen = needs_screen_context(text)
+        packet_metadata = dict(metadata or {})
+        packet_metadata["screen_context_requested"] = wants_screen
+
         packet = SourcePacket(
             source=self.source_name,
             modality="text",
@@ -53,13 +58,11 @@ class ChatSource:
             entity_id=entity_id,
             payload={"text": text},
             confidence=1.0,
-            metadata=dict(metadata or {}),
+            metadata=packet_metadata,
         )
 
-        # One fresh screen capture per chat turn. The runtime consumes this
-        # request before the text reaches the LLM, so chat context can use the
-        # latest screen snapshot without continuously polling the desktop.
-        request_screen_capture()
+        if wants_screen:
+            request_screen_capture()
 
         self._queue.append(packet)
         publish_text(packet)
