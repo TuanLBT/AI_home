@@ -9,6 +9,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from sources.text_bus import drain_text_inputs
+
 
 @dataclass(slots=True)
 class LLMJob:
@@ -132,6 +134,32 @@ class LLMWorker:
             )
 
     def update(self) -> list[dict]:
+        # Chat, GUI, web, or any future text transport arrives here through
+        # the same normalized SourcePacket bus. ASR can continue to call
+        # submit() directly until speech is migrated onto the same bus.
+        for packet in drain_text_inputs():
+            if packet.modality != "text":
+                continue
+
+            payload = packet.payload if isinstance(packet.payload, dict) else {}
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                continue
+
+            entity_id = packet.entity_id or "desktop_user"
+            self.submit(
+                entity_id=entity_id,
+                text=text,
+                context={
+                    "input_source": packet.source,
+                    "input_metadata": dict(packet.metadata or {}),
+                    "dialogue": {},
+                    "memory": {},
+                    "visual": {},
+                },
+                timestamp=packet.timestamp,
+            )
+
         results: list[dict] = []
 
         while True:
@@ -205,6 +233,7 @@ class LLMWorker:
 
         context_text = (
             f"behavior_state={job.context.get('behavior_state')}\n"
+            f"input_source={job.context.get('input_source')}\n"
             f"posture={posture}\n"
             f"motion={motion}\n"
             f"visual={visual}\n"
