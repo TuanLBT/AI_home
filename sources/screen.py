@@ -9,9 +9,10 @@ from sources.base import SourcePacket
 from sources.screen_bus import consume_screen_capture_request, publish_screen
 
 try:
-    from PIL import ImageGrab
+    from PIL import ImageGrab, UnidentifiedImageError
 except ImportError:
     ImageGrab = None
+    UnidentifiedImageError = OSError
 
 
 class ScreenSource:
@@ -29,6 +30,8 @@ class ScreenSource:
         change_threshold: float = 0.015,
         analysis_size: tuple[int, int] = (160, 90),
         all_screens: bool = False,
+        capture_retries: int = 2,
+        capture_retry_delay_s: float = 0.20,
     ):
         if ImageGrab is None:
             raise RuntimeError(
@@ -40,6 +43,8 @@ class ScreenSource:
         self.change_threshold = max(0.0, float(change_threshold))
         self.analysis_size = analysis_size
         self.all_screens = bool(all_screens)
+        self.capture_retries = max(0, int(capture_retries))
+        self.capture_retry_delay_s = max(0.0, float(capture_retry_delay_s))
 
         self._previous_analysis: np.ndarray | None = None
         self._latest_packet: SourcePacket | None = None
@@ -81,12 +86,34 @@ class ScreenSource:
     def capture_now(self) -> SourcePacket | None:
         now = time.monotonic()
 
-        try:
-            image = ImageGrab.grab(all_screens=self.all_screens)
-            frame = np.asarray(image.convert("RGB"), dtype=np.uint8)
-            self._capture_error = None
-        except Exception as exc:
-            self._capture_error = str(exc)
+        frame = None
+        last_error: Exception | None = None
+        attempts = self.capture_retries + 1
+
+        for attempt in range(attempts):
+            try:
+                image = ImageGrab.grab(all_screens=self.all_screens)
+                frame = np.asarray(image.convert("RGB"), dtype=np.uint8)
+                self._capture_error = None
+                break
+            except (UnidentifiedImageError, OSError) as exc:
+                # On KDE Wayland Pillow may delegate capture to Spectacle. The
+                # helper can occasionally hand Pillow a temporary PNG before it
+                # is fully written, producing "cannot identify image file".
+                # Retry a couple of times rather than failing the whole screen
+                # observation.
+                last_error = exc
+                if attempt + 1 < attempts:
+                    time.sleep(self.capture_retry_delay_s)
+                    continue
+                self._capture_error = str(exc)
+                return None
+            except Exception as exc:
+                self._capture_error = str(exc)
+                return None
+
+        if frame is None:
+            self._capture_error = str(last_error or "screen capture failed")
             return None
 
         analysis = self._analysis_frame(frame)
