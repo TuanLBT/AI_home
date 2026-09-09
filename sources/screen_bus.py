@@ -7,14 +7,22 @@ from sources.base import SourcePacket
 
 _lock = threading.Lock()
 _latest: SourcePacket | None = None
+_latest_representation: dict | None = None
 _capture_requested = False
 
 
 def publish_screen(packet: SourcePacket) -> None:
-    """Publish the newest normalized screen observation."""
+    """Publish the newest normalized raw screen observation."""
     global _latest
     with _lock:
         _latest = packet
+
+
+def publish_screen_representation(representation: dict) -> None:
+    """Publish derived screen facts separately from raw screenshot evidence."""
+    global _latest_representation
+    with _lock:
+        _latest_representation = dict(representation or {})
 
 
 def request_screen_capture() -> None:
@@ -38,10 +46,27 @@ def latest_screen() -> SourcePacket | None:
         return _latest
 
 
+def latest_screen_representation() -> dict | None:
+    with _lock:
+        if _latest_representation is None:
+            return None
+        return dict(_latest_representation)
+
+
 def latest_screen_context() -> dict:
-    packet = latest_screen()
+    with _lock:
+        packet = _latest
+        representation = (
+            dict(_latest_representation)
+            if _latest_representation is not None
+            else None
+        )
+
     if packet is None:
-        return {"available": False}
+        return {
+            "available": False,
+            "representation": representation,
+        }
 
     metadata = dict(packet.metadata or {})
     return {
@@ -52,4 +77,5 @@ def latest_screen_context() -> dict:
         "changed": metadata.get("changed"),
         "change_score": metadata.get("change_score"),
         "capture_backend": metadata.get("capture_backend"),
+        "representation": representation,
     }
