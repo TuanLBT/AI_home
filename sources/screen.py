@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -13,6 +15,38 @@ try:
     from PIL import ImageGrab
 except ImportError:
     ImageGrab = None
+
+
+@contextmanager
+def _quiet_stderr(enabled: bool = True) -> Iterator[None]:
+    """Temporarily silence OS-level stderr inherited by capture helpers.
+
+    On KDE Wayland, Pillow may spawn Spectacle. Spectacle writes informational
+    Tesseract/icon-theme messages directly to stderr, so Qt logging rules alone
+    do not reliably silence them. Redirecting file descriptor 2 during grab()
+    also silences the helper process while preserving Python exceptions.
+    """
+    if not enabled:
+        yield
+        return
+
+    try:
+        stderr_fd = sys.stderr.fileno()
+        saved_fd = os.dup(stderr_fd)
+        null_fd = os.open(os.devnull, os.O_WRONLY)
+    except (AttributeError, OSError, ValueError):
+        yield
+        return
+
+    try:
+        os.dup2(null_fd, stderr_fd)
+        yield
+    finally:
+        try:
+            os.dup2(saved_fd, stderr_fd)
+        finally:
+            os.close(saved_fd)
+            os.close(null_fd)
 
 
 class ScreenSource:
@@ -30,6 +64,7 @@ class ScreenSource:
         change_threshold: float = 0.015,
         analysis_size: tuple[int, int] = (160, 90),
         all_screens: bool = False,
+        suppress_backend_stderr: bool = True,
     ):
         if ImageGrab is None:
             raise RuntimeError(
@@ -41,14 +76,15 @@ class ScreenSource:
         self.change_threshold = max(0.0, float(change_threshold))
         self.analysis_size = analysis_size
         self.all_screens = bool(all_screens)
+        self.suppress_backend_stderr = bool(suppress_backend_stderr)
 
         self._previous_analysis: np.ndarray | None = None
         self._latest_packet: SourcePacket | None = None
         self._latest_change_score: float | None = None
         self._capture_error: str | None = None
 
-        # Suppress noisy KDE/Spectacle Qt logging inherited by the helper
-        # process used by Pillow on Wayland. Existing user rules are preserved.
+        # Keep the Qt rules as a first line of defence. KDE/Spectacle can still
+        # emit directly to stderr, which capture_now() suppresses separately.
         existing = os.environ.get("QT_LOGGING_RULES", "").strip()
         quiet_rules = "kf.iconthemes=false;spectacle.debug=false"
         if quiet_rules not in existing:
@@ -90,7 +126,8 @@ class ScreenSource:
         now = time.monotonic()
 
         try:
-            image = ImageGrab.grab(all_screens=self.all_screens)
+            with _quiet_stderr(self.suppress_backend_stderr):
+                image = ImageGrab.grab(all_screens=self.all_screens)
             frame = np.asarray(image.convert("RGB"), dtype=np.uint8)
             self._capture_error = None
         except Exception as exc:
@@ -151,6 +188,7 @@ class ScreenSource:
             "capabilities": ["rgb", "change_detection", "on_demand_capture"],
             "change_threshold": self.change_threshold,
             "backend": "pillow_imagegrab_on_demand",
+            "suppress_backend_stderr": self.suppress_backend_stderr,
         }
 
     def _analysis_frame(self, frame: np.ndarray) -> np.ndarray:
