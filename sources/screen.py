@@ -83,8 +83,6 @@ class ScreenSource:
         self._latest_change_score: float | None = None
         self._capture_error: str | None = None
 
-        # Keep the Qt rules as a first line of defence. KDE/Spectacle can still
-        # emit directly to stderr, which capture_now() suppresses separately.
         existing = os.environ.get("QT_LOGGING_RULES", "").strip()
         quiet_rules = "kf.iconthemes=false;spectacle.debug=false"
         if quiet_rules not in existing:
@@ -120,7 +118,9 @@ class ScreenSource:
         if packet is None:
             return []
 
-        return [packet] if packet.metadata.get("changed") else []
+        # A requested fresh frame is useful to perception even when its cheap
+        # change score is below threshold. `changed` remains evidence metadata.
+        return [packet]
 
     def capture_now(self) -> SourcePacket | None:
         now = time.monotonic()
