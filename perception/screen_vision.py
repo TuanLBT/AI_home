@@ -58,11 +58,11 @@ SCREEN_STATE_SCHEMA = {
 
 
 class ScreenVisionPerception:
-    """Turn a raw desktop screenshot into a neutral structured representation.
+    """Turn desktop screenshots into grounded structured screen state.
 
-    The backend is an Ollama VLM, but the rest of the agent only consumes the
-    published representation. A future OCR/UI-tree/local model can replace or
-    augment this adapter without changing ChatSource or LLMWorker.
+    Very wide frames are treated as an extended desktop and split into monitor
+    regions before vision inference. This preserves text/layout detail instead
+    of shrinking the entire multi-monitor panorama into one tiny image.
     """
 
     def __init__(
@@ -73,6 +73,7 @@ class ScreenVisionPerception:
         timeout_s: float = 90.0,
         max_width: int = 2560,
         jpeg_quality: int = 82,
+        extended_aspect_threshold: float = 2.2,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = (
@@ -83,13 +84,18 @@ class ScreenVisionPerception:
         self.timeout_s = float(timeout_s)
         self.max_width = max(640, int(max_width))
         self.jpeg_quality = max(40, min(95, int(jpeg_quality)))
+        self.extended_aspect_threshold = max(
+            1.5,
+            float(extended_aspect_threshold),
+        )
 
     def metadata(self) -> dict:
         return {
             "backend": "ollama_vlm",
             "model": self.model,
             "max_width": self.max_width,
-            "representation": "structured_screen_state_v1",
+            "representation": "structured_screen_state_v2",
+            "multi_monitor": True,
         }
 
     def describe(self, packet: SourcePacket) -> dict:
@@ -108,23 +114,57 @@ class ScreenVisionPerception:
             return result
 
         try:
-            encoded, width, height = self._encode_frame(frame)
-            state = self._ask_vlm(encoded)
+            regions = self._monitor_regions(frame)
+            monitors: list[dict] = []
+
+            for index, region in enumerate(regions):
+                encoded, width, height = self._encode_frame(region)
+                state = self._ask_vlm(encoded)
+                monitors.append(
+                    {
+                        "id": f"monitor_{index}",
+                        "position": self._monitor_position(index, len(regions)),
+                        "active_app": state.get("active_app"),
+                        "windows": state.get("windows", []),
+                        "visible_text": state.get("visible_text", []),
+                        "errors": state.get("errors", []),
+                        "dialogs": state.get("dialogs", []),
+                        "ui_state": state.get("ui_state", []),
+                        "description": state.get("description", ""),
+                        "input_width": width,
+                        "input_height": height,
+                    }
+                )
+
+            description = " | ".join(
+                f"{monitor['id']} ({monitor['position']}): "
+                f"{monitor.get('description', '')}"
+                for monitor in monitors
+                if monitor.get("description")
+            )
+
             result = {
                 "available": True,
                 "timestamp": packet.timestamp,
                 "backend": "ollama_vlm",
                 "model": self.model,
-                "schema": "structured_screen_state_v1",
-                "active_app": state.get("active_app"),
-                "windows": state.get("windows", []),
-                "visible_text": state.get("visible_text", []),
-                "errors": state.get("errors", []),
-                "dialogs": state.get("dialogs", []),
-                "ui_state": state.get("ui_state", []),
-                "description": state.get("description", ""),
-                "input_width": width,
-                "input_height": height,
+                "schema": "structured_screen_state_v2",
+                "monitor_count": len(monitors),
+                "monitors": monitors,
+                # Compatibility fields for callers that still expect v1.
+                "active_app": (
+                    monitors[0].get("active_app")
+                    if len(monitors) == 1
+                    else None
+                ),
+                "windows": self._merge_lists(monitors, "windows"),
+                "visible_text": self._merge_lists(monitors, "visible_text"),
+                "errors": self._merge_lists(monitors, "errors"),
+                "dialogs": self._merge_lists(monitors, "dialogs"),
+                "ui_state": self._merge_lists(monitors, "ui_state"),
+                "description": description,
+                "source_width": int(frame.shape[1]),
+                "source_height": int(frame.shape[0]),
             }
         except Exception as exc:
             result = {
@@ -137,6 +177,41 @@ class ScreenVisionPerception:
 
         publish_screen_representation(result)
         return result
+
+    def _monitor_regions(self, frame: np.ndarray) -> list[np.ndarray]:
+        height, width = frame.shape[:2]
+        aspect = width / max(1.0, float(height))
+
+        # Current KDE/Wayland capture returns the whole extended desktop. For
+        # the user's side-by-side two-monitor layout, a very wide frame is split
+        # into left and right physical-display regions before VLM inference.
+        if aspect >= self.extended_aspect_threshold:
+            split_x = width // 2
+            if split_x >= 640 and (width - split_x) >= 640:
+                return [
+                    frame[:, :split_x].copy(),
+                    frame[:, split_x:].copy(),
+                ]
+
+        return [frame]
+
+    @staticmethod
+    def _monitor_position(index: int, count: int) -> str:
+        if count == 2:
+            return "left" if index == 0 else "right"
+        if count == 1:
+            return "single"
+        return f"region_{index}"
+
+    @staticmethod
+    def _merge_lists(monitors: list[dict], key: str) -> list[str]:
+        out: list[str] = []
+        for monitor in monitors:
+            for item in monitor.get(key, []) or []:
+                value = str(item).strip()
+                if value and value not in out:
+                    out.append(value)
+        return out[:16]
 
     def _encode_frame(self, frame: np.ndarray) -> tuple[str, int, int]:
         rgb = frame
@@ -166,10 +241,10 @@ class ScreenVisionPerception:
     def _ask_vlm(self, image_b64: str) -> dict:
         prompt = (
             "/no_think\n"
-            "Inspect this desktop screenshot. Return the requested JSON only. "
+            "Inspect this ONE monitor screenshot. Return the requested JSON only. "
             "Record only visible evidence: active app, windows, useful readable "
             "text, errors, dialogs, and obvious UI state. Keep entries short. "
-            "Do not infer hidden content."
+            "Do not infer anything outside this monitor."
         )
 
         data = self._request_vlm(
@@ -183,13 +258,9 @@ class ScreenVisionPerception:
         text = str(message.get("content") or "").strip()
 
         if not text:
-            # Qwen3-VL can occasionally spend the whole output budget in its
-            # thinking channel despite think=false. Fall back to the simpler
-            # prose task that has proven much less likely to trigger that path,
-            # so screen questions still work instead of failing completely.
             fallback_prompt = (
                 "/no_think\n"
-                "Describe this desktop screenshot concisely using only visible "
+                "Describe this ONE monitor screenshot concisely using only visible "
                 "evidence. Mention apps/windows, important readable text, errors "
                 "or dialogs, and obvious UI state. No reasoning preamble."
             )
